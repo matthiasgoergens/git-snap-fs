@@ -213,7 +213,7 @@ impl GitSnapFs {
             .map(|(_, id)| id)
             .ok_or_else(|| io::Error::from_raw_os_error(libc::ENOENT))?;
 
-        let (meta, _) = self.ensure_commit_node(commit_id.clone())?;
+        let (meta, _) = self.ensure_commit_node(commit_id)?;
         let target = format!("../commits/{}", meta.id).into_bytes();
         let inode = synthetic_inode(namespace, name);
         let node = Node {
@@ -273,7 +273,7 @@ impl GitSnapFs {
             let name_bytes = name.as_bytes();
             let inode = synthetic_inode(namespace, name_bytes);
             if !self.nodes.read().contains_key(&inode) {
-                let (meta, _) = self.ensure_commit_node(commit_id.clone())?;
+                let (meta, _) = self.ensure_commit_node(commit_id)?;
                 let target = format!("../commits/{}", meta.id).into_bytes();
                 let node = Node {
                     inode,
@@ -302,8 +302,8 @@ impl GitSnapFs {
 
     fn materialize_tree_child(&self, parent: &Node, name: &[u8]) -> io::Result<(Node, stat64)> {
         let (meta, tree_id) = match &parent.kind {
-            NodeKind::Commit { meta } => (meta.clone(), meta.tree.clone()),
-            NodeKind::Tree { meta, tree } => (meta.clone(), tree.clone()),
+            NodeKind::Commit { meta } => (meta.clone(), meta.tree),
+            NodeKind::Tree { meta, tree } => (meta.clone(), *tree),
             NodeKind::Submodule { .. } => return Err(io::Error::from_raw_os_error(libc::ENOTDIR)),
             NodeKind::Blob { .. } | NodeKind::Symlink { .. } => {
                 return Err(io::Error::from_raw_os_error(libc::ENOTDIR))
@@ -315,7 +315,7 @@ impl GitSnapFs {
 
         let repo = self.repo.thread_local();
         let tree = repo
-            .find_tree(tree_id.clone())
+            .find_tree(tree_id)
             .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
 
         let mut found_mode: Option<EntryMode> = None;
@@ -334,7 +334,7 @@ impl GitSnapFs {
             None => return Err(io::Error::from_raw_os_error(libc::ENOENT)),
         };
         let oid_raw = found_oid.expect("mode implies oid");
-        let child_oid: ObjectId = oid_raw.into();
+        let child_oid: ObjectId = oid_raw;
         let child_inode = inode_from_oid(&child_oid);
 
         drop(tree);

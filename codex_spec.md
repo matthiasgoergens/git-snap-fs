@@ -101,6 +101,7 @@ Expose a Git repository as a read-only filesystem:
 - **Read-only**: any VFS modifying operation returns `-EROFS`.  
 - **Cached** in kernel: use as much of FUSE’s caches as possible. Don’t do our own caching (unless profiling later suggests otherwise).  
 - **Times**: use commit’s committer time for entries beneath `/commits/<id>`; dirs `0555`; files `0444/0555`; symlinks `0777`. (But we can review this. Do whatever is simplest first.)
+- `cargo check` should pass without warnings, same for `cargo clippy --all-targets --all-features -- -D warnings`.
 
 ### Freshness
 
