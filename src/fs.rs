@@ -1,11 +1,9 @@
 //! FUSE filesystem implementation for `GitSnapFS`.
 
-use std::collections::{HashMap, HashSet};
 use std::convert::TryFrom;
 use std::ffi::CStr;
 use std::io;
 use std::str;
-use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use fuse_backend_rs::abi::fuse_abi::{stat64, CreateIn, ROOT_ID};
@@ -16,53 +14,9 @@ use gix::bstr::ByteSlice;
 use gix::object::tree::{EntryKind, EntryMode};
 use gix::ObjectId;
 use libc::{S_IFDIR, S_IFLNK, S_IFREG};
-use parking_lot::RwLock;
 
 use crate::inode::inode_from_oid;
 use crate::repo::Repository;
-
-#[derive(Debug, Clone, Copy)]
-struct CommitMeta { // FIXME: why do we need this?  Remove.  It doesn't even have the right name.s
-    id: ObjectId,
-    tree: ObjectId,
-    time: SystemTime,
-}
-
-#[derive(Debug, Clone)]
-enum NodeKind {
-    Commit {
-        meta: CommitMeta,
-    },
-    Tree {
-        meta: CommitMeta,
-        tree: ObjectId,
-    },
-    Blob {
-        meta: CommitMeta,
-        oid: ObjectId,
-        executable: bool,
-        size: u64,
-    },
-    Symlink {
-        meta: CommitMeta,
-        target: Vec<u8>,
-    },
-    Submodule {
-        meta: CommitMeta,
-        _oid: ObjectId,
-    },
-    SyntheticSymlink {
-        target: Vec<u8>,
-        time: SystemTime,
-    },
-}
-
-// FIXME: remove this.  It's useless, we can look up everything on demand in git.
-#[derive(Debug, Clone)]
-struct Node {
-    inode: u64,
-    kind: NodeKind,
-}
 
 const ROOT_ATTR_MODE: u32 = S_IFDIR | 0o755;
 const DIRECTORY_ATTR_MODE: u32 = S_IFDIR | 0o755;
@@ -79,72 +33,66 @@ const NAMESPACE_TAG: u8 = 2;
 const ENTRY_TTL: Duration = Duration::from_secs(1);
 const ATTR_TTL: Duration = Duration::from_secs(1);
 
-const NAME_DOT: &[u8] = b".";
-const NAME_DOT_DOT: &[u8] = b"..";
-const NAME_COMMITS: &[u8] = b"commits";
-const NAME_BRANCHES: &[u8] = b"branches";
-const NAME_TAGS: &[u8] = b"tags";
-const NAME_HEAD: &[u8] = b"HEAD";
-
-pub struct GitSnapFs {
-    repo: Arc<Repository>,
-    start_time: SystemTime,
-    // FIXME: drop this.  We can look up everything on demand in git.
-    nodes: RwLock<HashMap<u64, Node>>,
+struct DirRecord {
+    name: Vec<u8>,
+    ino: u64,
+    dtype: u32,
+    entry: Option<Entry>,
 }
 
-fn synthetic_inode(namespace: u8, name: &[u8]) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    namespace.hash(&mut hasher);
-    name.hash(&mut hasher);
-    let hash = hasher.finish();
-    (u64::from(namespace) << 56) | (hash & 0x00FF_FFFF_FFFF_FFFF)
+enum TreeContext {
+    Commit { tree_id: ObjectId },
+    Tree { tree_id: ObjectId },
+}
+
+enum RefNamespace {
+    Branches,
+    Tags,
+}
+
+impl RefNamespace {
+    fn marker(&self) -> u8 {
+        match self {
+            RefNamespace::Branches => NAMESPACE_BRANCH,
+            RefNamespace::Tags => NAMESPACE_TAG,
+        }
+    }
+
+    fn list(&self, repo: &Repository) -> io::Result<Vec<(String, ObjectId)>> {
+        let refs = match self {
+            RefNamespace::Branches => repo.list_branches(),
+            RefNamespace::Tags => repo.list_tags(),
+        }
+        .map_err(io::Error::other)?;
+        Ok(refs)
+    }
+
+    fn parent_inode(&self) -> u64 {
+        match self {
+            RefNamespace::Branches => INODE_BRANCHES,
+            RefNamespace::Tags => INODE_TAGS,
+        }
+    }
+}
+
+pub struct GitSnapFs {
+    repo: Repository,
+    mount_time: SystemTime,
 }
 
 impl GitSnapFs {
     pub fn new(repo: Repository) -> Self {
         Self {
-            repo: Arc::new(repo),
-            start_time: SystemTime::now(),
-            nodes: RwLock::new(HashMap::new()),
+            repo,
+            mount_time: SystemTime::now(),
         }
     }
 
     fn root_attr(&self) -> stat64 {
-        build_dir_attr(ROOT_ID, ROOT_ATTR_MODE, self.start_time)
+        build_dir_attr(ROOT_ID, ROOT_ATTR_MODE, self.mount_time)
     }
 
-    fn special_dir_entry(&self, inode: u64) -> Entry {
-        Entry {
-            inode,
-            generation: 0,
-            attr: build_dir_attr(inode, DIRECTORY_ATTR_MODE, self.start_time),
-            attr_flags: 0,
-            attr_timeout: ATTR_TTL,
-            entry_timeout: ENTRY_TTL,
-        }
-    }
-
-    fn head_entry(&self) -> io::Result<Entry> {
-        let (meta, target) = self.head_metadata()?;
-        let attr = build_symlink_attr(
-            INODE_HEAD,
-            SYMLINK_ATTR_MODE,
-            meta.time,
-            target.len() as u64,
-        );
-        Ok(Entry {
-            inode: INODE_HEAD,
-            generation: 0,
-            attr,
-            attr_flags: 0,
-            attr_timeout: ATTR_TTL,
-            entry_timeout: ENTRY_TTL,
-        })
-    }
-
-    fn make_entry(inode: u64, attr: stat64) -> Entry {
+    fn make_entry(&self, inode: u64, attr: stat64) -> Entry {
         Entry {
             inode,
             generation: 0,
@@ -153,423 +101,332 @@ impl GitSnapFs {
             attr_timeout: ATTR_TTL,
             entry_timeout: ENTRY_TTL,
         }
+    }
+
+    fn synthetic_dir_entry(&self, inode: u64) -> Entry {
+        self.make_entry(inode, build_dir_attr(inode, DIRECTORY_ATTR_MODE, self.mount_time))
     }
 
     fn lookup_commit(&self, name: &[u8]) -> io::Result<Entry> {
         let name_str =
             str::from_utf8(name).map_err(|_| io::Error::from_raw_os_error(libc::ENOENT))?;
-
         let commit_id = self
             .repo
             .resolve_full_commit_id(name_str)
             .map_err(io::Error::other)?;
-
-        let (meta, inode) = self.ensure_commit_node(commit_id)?;
-        let attr = build_dir_attr(inode, DIRECTORY_ATTR_MODE, meta.time);
-        Ok(Self::make_entry(inode, attr))
-    }
-
-    fn ensure_commit_node(&self, commit_id: ObjectId) -> io::Result<(CommitMeta, u64)> {
         let inode = inode_from_oid(&commit_id);
-        if let Some(existing) = self.nodes.read().get(&inode) {
-            if let NodeKind::Commit { meta } = &existing.kind {
-                return Ok((*meta, inode));
-            }
-        }
-
-        let repo = self.repo.thread_local();
-        let commit = repo.find_commit(commit_id).map_err(io::Error::other)?;
-        let tree_id = commit.tree_id().map_err(io::Error::other)?.detach();
-        let time = commit_time_to_system(&commit, self.start_time);
-
-        let meta = CommitMeta {
-            id: commit_id,
-            tree: tree_id,
-            time,
-        };
-
-        let node = Node {
+        Ok(self.make_entry(
             inode,
-            kind: NodeKind::Commit { meta },
-        };
-        self.nodes.write().insert(inode, node);
-        Ok((meta, inode))
+            build_dir_attr(inode, DIRECTORY_ATTR_MODE, self.mount_time),
+        ))
     }
 
-    fn node_for_inode(&self, inode: u64) -> io::Result<Node> {
-        self.nodes
-            .read()
-            .get(&inode)
-            .cloned()
-            .ok_or_else(|| io::Error::from_raw_os_error(libc::ENOENT))
-    }
-
-    fn lookup_reference_symlink(
-        &self,
-        name: &[u8],
-        namespace: u8,
-        refs: Vec<(String, ObjectId)>,
-    ) -> io::Result<Entry> {
+    fn lookup_reference(&self, name: &[u8], ns: RefNamespace) -> io::Result<Entry> {
         let name_str =
             str::from_utf8(name).map_err(|_| io::Error::from_raw_os_error(libc::ENOENT))?;
+        let refs = ns.list(&self.repo)?;
         let commit_id = refs
             .into_iter()
             .find(|(ref_name, _)| ref_name == name_str)
             .map(|(_, id)| id)
             .ok_or_else(|| io::Error::from_raw_os_error(libc::ENOENT))?;
-
-        let (meta, _) = self.ensure_commit_node(commit_id)?;
-        let target = format!("../commits/{}", meta.id).into_bytes();
-        let inode = synthetic_inode(namespace, name);
-        let node = Node {
+        let target = format!("../commits/{}", commit_id);
+        let inode = synthetic_inode(ns.marker(), name);
+        Ok(self.make_entry(
             inode,
-            kind: NodeKind::SyntheticSymlink {
-                target: target.clone(),
-                time: meta.time,
-            },
-        };
-        self.nodes.write().insert(inode, node);
-
-        let attr = build_symlink_attr(inode, SYMLINK_ATTR_MODE, meta.time, target.len() as u64);
-        Ok(Self::make_entry(inode, attr))
+            build_symlink_attr(
+                inode,
+                SYMLINK_ATTR_MODE,
+                self.mount_time,
+                target.len() as u64,
+            ),
+        ))
     }
 
-    fn readdir_refs(
-        &self,
-        mut offset: u64,
-        add_entry: &mut dyn FnMut(DirEntry) -> io::Result<usize>,
-        refs: Vec<(String, ObjectId)>,
-        namespace: u8,
-    ) -> io::Result<()> {
-        for (index, (name, commit_id)) in refs.into_iter().enumerate() {
-            let entry_offset = index as u64;
-            if offset > entry_offset {
-                continue;
-            }
+    fn head_entry(&self) -> io::Result<Entry> {
+        let target = self.head_target()?;
+        Ok(self.make_entry(
+            INODE_HEAD,
+            build_symlink_attr(
+                INODE_HEAD,
+                SYMLINK_ATTR_MODE,
+                self.mount_time,
+                target.len() as u64,
+            ),
+        ))
+    }
 
-            let name_bytes = name.as_bytes();
-            let inode = synthetic_inode(namespace, name_bytes);
-            let (meta, _) = self.ensure_commit_node(commit_id)?;
-            let target = format!("../commits/{}", meta.id).into_bytes();
-            {
-                let mut nodes = self.nodes.write();
-                nodes.insert(
+    fn head_target(&self) -> io::Result<Vec<u8>> {
+        let commit_id = self.repo.resolve_head().map_err(io::Error::other)?;
+        Ok(format!("../commits/{}", commit_id).into_bytes())
+    }
+
+    fn tree_context(&self, inode: u64) -> io::Result<TreeContext> {
+        let oid = self.repo.resolve_inode(inode).map_err(io::Error::other)?;
+        let repo = self.repo.thread_local();
+        let object = repo.find_object(oid).map_err(io::Error::other)?;
+        match object.kind {
+            gix::object::Kind::Commit => {
+                let commit = repo.find_commit(oid).map_err(io::Error::other)?;
+                let tree_id = commit.tree_id().map_err(io::Error::other)?.detach();
+                Ok(TreeContext::Commit { tree_id })
+            }
+            gix::object::Kind::Tree => Ok(TreeContext::Tree { tree_id: oid }),
+            _ => Err(io::Error::from_raw_os_error(libc::ENOTDIR)),
+        }
+    }
+
+    fn entry_for_tree_child(
+        &self,
+        mode: EntryMode,
+        oid: ObjectId,
+    ) -> io::Result<(Entry, u32)> {
+        let inode = inode_from_oid(&oid);
+        let kind = mode.kind();
+        let entry = match kind {
+            EntryKind::Tree | EntryKind::Commit => {
+                self.make_entry(inode, build_dir_attr(inode, DIRECTORY_ATTR_MODE, self.mount_time))
+            }
+            EntryKind::Blob => {
+                let repo = self.repo.thread_local();
+                let blob = repo.find_blob(oid).map_err(io::Error::other)?;
+                self.make_entry(
                     inode,
-                    Node {
+                    build_file_attr(
                         inode,
-                        kind: NodeKind::SyntheticSymlink {
-                            target,
-                            time: meta.time,
-                        },
-                    },
-                );
+                        S_IFREG | 0o444,
+                        blob.data.len() as u64,
+                        self.mount_time,
+                    ),
+                )
             }
-
-            if add_entry(DirEntry {
-                ino: inode,
-                offset: entry_offset + 1,
-                type_: u32::from(libc::DT_LNK),
-                name: name_bytes,
-            })? == 0
-            {
-                return Ok(());
+            EntryKind::BlobExecutable => {
+                let repo = self.repo.thread_local();
+                let blob = repo.find_blob(oid).map_err(io::Error::other)?;
+                self.make_entry(
+                    inode,
+                    build_file_attr(
+                        inode,
+                        S_IFREG | 0o555,
+                        blob.data.len() as u64,
+                        self.mount_time,
+                    ),
+                )
             }
-        }
-
-        Ok(())
-    }
-
-    fn readdir_commits(
-        &self,
-        mut offset: u64,
-        add_entry: &mut dyn FnMut(DirEntry) -> io::Result<usize>,
-    ) -> io::Result<()> {
-        if offset == 0 {
-            if add_entry(DirEntry {
-                ino: INODE_COMMITS,
-                offset: 1,
-                type_: u32::from(libc::DT_DIR),
-                name: NAME_DOT,
-            })? == 0
-            {
-                return Ok(());
-            }
-            offset = 1;
-        }
-
-        if offset == 1 {
-            if add_entry(DirEntry {
-                ino: ROOT_ID,
-                offset: 2,
-                type_: u32::from(libc::DT_DIR),
-                name: NAME_DOT_DOT,
-            })? == 0
-            {
-                return Ok(());
-            }
-            offset = 2;
-        }
-
-        let repo_commits = self.repo.list_commits().map_err(io::Error::other)?;
-
-        let mut seen = HashSet::new();
-        let mut commit_ids = Vec::new();
-
-        for id in repo_commits {
-            if seen.insert(id) {
-                commit_ids.push(id);
-            }
-        }
-
-        {
-            let nodes = self.nodes.read();
-            for node in nodes.values() {
-                if let NodeKind::Commit { meta } = &node.kind {
-                    if seen.insert(meta.id) {
-                        commit_ids.push(meta.id);
-                    }
-                }
-            }
-        }
-
-        commit_ids.sort();
-
-        for (index, commit_id) in commit_ids.iter().enumerate() {
-            let entry_offset = index as u64;
-            if offset > entry_offset {
-                continue;
-            }
-
-            let (meta, inode) = self.ensure_commit_node(*commit_id)?;
-            let name = meta.id.to_string();
-
-            if add_entry(DirEntry {
-                ino: inode,
-                offset: entry_offset + 1,
-                type_: u32::from(libc::DT_DIR),
-                name: name.as_bytes(),
-            })? == 0
-            {
-                return Ok(());
-            }
-        }
-
-        Ok(())
-    }
-
-    fn materialize_tree_child(&self, parent: &Node, name: &[u8]) -> io::Result<(Node, stat64)> {
-        let (meta, tree_id) = match &parent.kind {
-            NodeKind::Commit { meta } => (*meta, meta.tree),
-            NodeKind::Tree { meta, tree } => (*meta, *tree),
-            NodeKind::Submodule { .. }
-            | NodeKind::Blob { .. }
-            | NodeKind::Symlink { .. }
-            | NodeKind::SyntheticSymlink { .. } => {
-                return Err(io::Error::from_raw_os_error(libc::ENOTDIR))
+            EntryKind::Link => {
+                let repo = self.repo.thread_local();
+                let blob = repo.find_blob(oid).map_err(io::Error::other)?;
+                self.make_entry(
+                    inode,
+                    build_symlink_attr(
+                        inode,
+                        SYMLINK_ATTR_MODE,
+                        self.mount_time,
+                        blob.data.len() as u64,
+                    ),
+                )
             }
         };
+        let dtype = match kind {
+            EntryKind::Tree | EntryKind::Commit => libc::DT_DIR,
+            EntryKind::Blob | EntryKind::BlobExecutable => libc::DT_REG,
+            EntryKind::Link => libc::DT_LNK,
+        };
+        Ok((entry, u32::from(dtype)))
+    }
+
+    fn list_root(&self) -> io::Result<Vec<DirRecord>> {
+        let mut records = Vec::new();
+        records.push(DirRecord {
+            name: b".".to_vec(),
+            ino: ROOT_ID,
+            dtype: u32::from(libc::DT_DIR),
+            entry: Some(self.make_entry(ROOT_ID, self.root_attr())),
+        });
+        records.push(DirRecord {
+            name: b"..".to_vec(),
+            ino: ROOT_ID,
+            dtype: u32::from(libc::DT_DIR),
+            entry: Some(self.make_entry(ROOT_ID, self.root_attr())),
+        });
+        records.push(DirRecord {
+            name: b"commits".to_vec(),
+            ino: INODE_COMMITS,
+            dtype: u32::from(libc::DT_DIR),
+            entry: Some(self.synthetic_dir_entry(INODE_COMMITS)),
+        });
+        records.push(DirRecord {
+            name: b"branches".to_vec(),
+            ino: INODE_BRANCHES,
+            dtype: u32::from(libc::DT_DIR),
+            entry: Some(self.synthetic_dir_entry(INODE_BRANCHES)),
+        });
+        records.push(DirRecord {
+            name: b"tags".to_vec(),
+            ino: INODE_TAGS,
+            dtype: u32::from(libc::DT_DIR),
+            entry: Some(self.synthetic_dir_entry(INODE_TAGS)),
+        });
+        records.push(DirRecord {
+            name: b"HEAD".to_vec(),
+            ino: INODE_HEAD,
+            dtype: u32::from(libc::DT_LNK),
+            entry: Some(self.head_entry()?),
+        });
+        Ok(records)
+    }
+
+    fn list_commits_dir(&self) -> io::Result<Vec<DirRecord>> {
+        let mut records = Vec::new();
+        records.push(DirRecord {
+            name: b".".to_vec(),
+            ino: INODE_COMMITS,
+            dtype: u32::from(libc::DT_DIR),
+            entry: Some(self.synthetic_dir_entry(INODE_COMMITS)),
+        });
+        records.push(DirRecord {
+            name: b"..".to_vec(),
+            ino: ROOT_ID,
+            dtype: u32::from(libc::DT_DIR),
+            entry: Some(self.make_entry(ROOT_ID, self.root_attr())),
+        });
+        let commits = self.repo.list_commits().map_err(io::Error::other)?;
+        for commit_id in commits {
+            let inode = inode_from_oid(&commit_id);
+            let name = commit_id.to_string().into_bytes();
+            records.push(DirRecord {
+                name,
+                ino: inode,
+                dtype: u32::from(libc::DT_DIR),
+                entry: Some(self.make_entry(
+                    inode,
+                    build_dir_attr(inode, DIRECTORY_ATTR_MODE, self.mount_time),
+                )),
+            });
+        }
+        Ok(records)
+    }
+
+    fn list_refs_dir(&self, ns: RefNamespace) -> io::Result<Vec<DirRecord>> {
+        let mut records = Vec::new();
+        let parent = ns.parent_inode();
+        records.push(DirRecord {
+            name: b".".to_vec(),
+            ino: parent,
+            dtype: u32::from(libc::DT_DIR),
+            entry: Some(self.synthetic_dir_entry(parent)),
+        });
+        records.push(DirRecord {
+            name: b"..".to_vec(),
+            ino: ROOT_ID,
+            dtype: u32::from(libc::DT_DIR),
+            entry: Some(self.make_entry(ROOT_ID, self.root_attr())),
+        });
+        let refs = ns.list(&self.repo)?;
+        for (name, commit_id) in refs {
+            let mut target = Vec::new();
+            target.extend_from_slice(b"../commits/");
+            target.extend_from_slice(commit_id.to_string().as_bytes());
+            let inode = synthetic_inode(ns.marker(), name.as_bytes());
+            records.push(DirRecord {
+                name: name.into_bytes(),
+                ino: inode,
+                dtype: u32::from(libc::DT_LNK),
+                entry: Some(self.make_entry(
+                    inode,
+                    build_symlink_attr(
+                        inode,
+                        SYMLINK_ATTR_MODE,
+                        self.mount_time,
+                        target.len() as u64,
+                    ),
+                )),
+            });
+        }
+        Ok(records)
+    }
+
+    fn list_tree_dir(&self, inode: u64) -> io::Result<Vec<DirRecord>> {
+        let context = self.tree_context(inode)?;
+        let (tree_id, parent) = match &context {
+            TreeContext::Commit { tree_id } => (*tree_id, Some(INODE_COMMITS)),
+            TreeContext::Tree { tree_id } => (*tree_id, None),
+        };
+        let mut records = Vec::new();
+        let self_entry = Some(self.make_entry(
+            inode,
+            build_dir_attr(inode, DIRECTORY_ATTR_MODE, self.mount_time),
+        ));
+        records.push(DirRecord {
+            name: b".".to_vec(),
+            ino: inode,
+            dtype: u32::from(libc::DT_DIR),
+            entry: self_entry,
+        });
+        records.push(DirRecord {
+            name: b"..".to_vec(),
+            ino: parent.unwrap_or(ROOT_ID),
+            dtype: u32::from(libc::DT_DIR),
+            entry: Some(if let Some(parent_inode) = parent {
+                self.synthetic_dir_entry(parent_inode)
+            } else {
+                self.make_entry(ROOT_ID, self.root_attr())
+            }),
+        });
 
         let repo = self.repo.thread_local();
         let tree = repo.find_tree(tree_id).map_err(io::Error::other)?;
+        for entry in tree.iter() {
+            let entry = entry.map_err(io::Error::other)?;
+            let oid = entry.inner.oid.to_owned();
+            let (child_entry, dtype) = self.entry_for_tree_child(entry.inner.mode, oid)?;
+            records.push(DirRecord {
+                name: entry.inner.filename.as_bstr().to_vec(),
+                ino: child_entry.inode,
+                dtype,
+                entry: Some(child_entry),
+            });
+        }
+        Ok(records)
+    }
 
-        let mut entry_info: Option<(EntryMode, ObjectId)> = None;
+    fn list_directory(&self, inode: u64) -> io::Result<Vec<DirRecord>> {
+        match inode {
+            ROOT_ID => self.list_root(),
+            INODE_COMMITS => self.list_commits_dir(),
+            INODE_BRANCHES => self.list_refs_dir(RefNamespace::Branches),
+            INODE_TAGS => self.list_refs_dir(RefNamespace::Tags),
+            _ => self.list_tree_dir(inode),
+        }
+    }
+
+    fn lookup_child(&self, parent: u64, name: &[u8]) -> io::Result<Entry> {
+        let context = self.tree_context(parent)?;
+        let tree_id = match context {
+            TreeContext::Commit { tree_id } | TreeContext::Tree { tree_id } => tree_id,
+        };
+        let repo = self.repo.thread_local();
+        let tree = repo.find_tree(tree_id).map_err(io::Error::other)?;
         for entry in tree.iter() {
             let entry = entry.map_err(io::Error::other)?;
             if entry.inner.filename.as_bytes() == name {
-                entry_info = Some((entry.inner.mode, entry.inner.oid.to_owned()));
-                break;
+                let oid = entry.inner.oid.to_owned();
+                let (child_entry, _) = self.entry_for_tree_child(entry.inner.mode, oid)?;
+                return Ok(child_entry);
             }
         }
-
-        let Some((mode, oid_raw)) = entry_info else {
-            return Err(io::Error::from_raw_os_error(libc::ENOENT));
-        };
-        let child_oid: ObjectId = oid_raw;
-        let child_inode = inode_from_oid(&child_oid);
-
-        if let Some(existing) = self.nodes.read().get(&child_inode) {
-            let attr = Self::attr_for_node(existing);
-            return Ok((existing.clone(), attr));
-        }
-
-        let kind = mode.kind();
-
-        let (node, attr) = match kind {
-            EntryKind::Tree => {
-                let node = Node {
-                    inode: child_inode,
-                    kind: NodeKind::Tree {
-                        meta,
-                        tree: child_oid,
-                    },
-                };
-                let attr = build_dir_attr(child_inode, DIRECTORY_ATTR_MODE, meta.time);
-                (node, attr)
-            }
-            EntryKind::Blob | EntryKind::BlobExecutable => {
-                let blob = repo.find_blob(child_oid).map_err(io::Error::other)?;
-                let executable = matches!(kind, EntryKind::BlobExecutable);
-                let file_mode = if executable {
-                    S_IFREG | 0o555
-                } else {
-                    S_IFREG | 0o444
-                };
-                let size = blob.data.len() as u64;
-                let node = Node {
-                    inode: child_inode,
-                    kind: NodeKind::Blob {
-                        meta,
-                        oid: child_oid,
-                        executable,
-                        size,
-                    },
-                };
-                let attr = build_file_attr(child_inode, file_mode, size, meta.time);
-                (node, attr)
-            }
-            EntryKind::Link => {
-                let blob = repo.find_blob(child_oid).map_err(io::Error::other)?;
-                let target = blob.data.clone();
-                let size = target.len() as u64;
-                let node = Node {
-                    inode: child_inode,
-                    kind: NodeKind::Symlink {
-                        meta,
-                        target,
-                    },
-                };
-                let attr = build_symlink_attr(child_inode, SYMLINK_ATTR_MODE, meta.time, size);
-                (node, attr)
-            }
-            EntryKind::Commit => {
-                let node = Node {
-                    inode: child_inode,
-                    kind: NodeKind::Submodule {
-                        meta,
-                        _oid: child_oid,
-                    },
-                };
-                let attr = build_dir_attr(child_inode, DIRECTORY_ATTR_MODE, meta.time);
-                (node, attr)
-            }
-        };
-
-        self.nodes.write().insert(child_inode, node.clone());
-        Ok((node, attr))
+        Err(io::Error::from_raw_os_error(libc::ENOENT))
     }
 
-    fn attr_for_node(node: &Node) -> stat64 {
-        match &node.kind {
-            NodeKind::Commit { meta }
-            | NodeKind::Tree { meta, .. }
-            | NodeKind::Submodule { meta, .. } => {
-                build_dir_attr(node.inode, DIRECTORY_ATTR_MODE, meta.time)
-            }
-            NodeKind::Blob {
-                meta,
-                executable,
-                size,
-                ..
-            } => {
-                let mode = if *executable {
-                    S_IFREG | 0o555
-                } else {
-                    S_IFREG | 0o444
-                };
-                build_file_attr(node.inode, mode, *size, meta.time)
-            }
-            NodeKind::Symlink { meta, target, .. } => build_symlink_attr(
-                node.inode,
-                SYMLINK_ATTR_MODE,
-                meta.time,
-                target.len() as u64,
-            ),
-            NodeKind::SyntheticSymlink { target, time } => {
-                build_symlink_attr(node.inode, SYMLINK_ATTR_MODE, *time, target.len() as u64)
+    fn reference_target(&self, inode: u64, ns: RefNamespace) -> io::Result<Vec<u8>> {
+        let refs = ns.list(&self.repo)?;
+        for (name, commit_id) in refs {
+            let candidate = synthetic_inode(ns.marker(), name.as_bytes());
+            if candidate == inode {
+                return Ok(format!("../commits/{}", commit_id).into_bytes());
             }
         }
-    }
-
-    fn head_metadata(&self) -> io::Result<(CommitMeta, Vec<u8>)> {
-        let commit_id = self.repo.resolve_head().map_err(io::Error::other)?;
-        let (meta, _) = self.ensure_commit_node(commit_id)?;
-        let target = format!("../commits/{}", meta.id).into_bytes();
-        Ok((meta, target))
-    }
-
-    fn readdir_node(
-        &self,
-        node: &Node,
-        mut offset: u64,
-        add_entry: &mut dyn FnMut(DirEntry) -> io::Result<usize>,
-    ) -> io::Result<()> {
-        let parent_inode = node.parent.unwrap_or(ROOT_ID);
-
-        if offset == 0 {
-            if add_entry(DirEntry {
-                ino: node.inode,
-                offset: 1,
-                type_: u32::from(libc::DT_DIR),
-                name: NAME_DOT,
-            })? == 0
-            {
-                return Ok(());
-            }
-            offset = 1;
-        }
-
-        if offset == 1 {
-            if add_entry(DirEntry {
-                ino: parent_inode,
-                offset: 2,
-                type_: u32::from(libc::DT_DIR),
-                name: NAME_DOT_DOT,
-            })? == 0
-            {
-                return Ok(());
-            }
-            offset = 2;
-        }
-
-        let tree_id = match &node.kind {
-            NodeKind::Commit { meta } => meta.tree,
-            NodeKind::Tree { tree, .. } => *tree,
-            NodeKind::Submodule { .. } | NodeKind::SyntheticSymlink { .. } => return Ok(()),
-            NodeKind::Blob { .. } | NodeKind::Symlink { .. } => {
-                return Err(io::Error::from_raw_os_error(libc::ENOTDIR))
-            }
-        };
-
-        let repo = self.repo.thread_local();
-        let tree = repo.find_tree(tree_id).map_err(io::Error::other)?;
-
-        for (index, entry) in tree.iter().enumerate() {
-            let entry = entry.map_err(io::Error::other)?;
-            let entry_offset = index as u64;
-            if offset > entry_offset {
-                continue;
-            }
-
-            let filename = entry.inner.filename.as_bytes();
-            let (child, _) = self.materialize_tree_child(node, filename)?;
-            let entry_type = match entry.inner.mode.kind() {
-                EntryKind::Blob | EntryKind::BlobExecutable => libc::DT_REG,
-                EntryKind::Link => libc::DT_LNK,
-                EntryKind::Tree | EntryKind::Commit => libc::DT_DIR,
-            };
-
-            if add_entry(DirEntry {
-                ino: child.inode,
-                offset: entry_offset + 1,
-                type_: u32::from(entry_type),
-                name: filename,
-            })? == 0
-            {
-                return Ok(());
-            }
-        }
-
-        Ok(())
+        Err(io::Error::from_raw_os_error(libc::ENOENT))
     }
 }
 
@@ -581,59 +438,22 @@ impl FileSystem for GitSnapFs {
         &self,
         _ctx: &Context,
         parent: Self::Inode,
-        name: &std::ffi::CStr,
+        name: &CStr,
     ) -> io::Result<Entry> {
         let name = name.to_bytes();
-        if parent == ROOT_ID {
-            return match name {
-                b"commits" => Ok(self.special_dir_entry(INODE_COMMITS)),
-                b"branches" => Ok(self.special_dir_entry(INODE_BRANCHES)),
-                b"tags" => Ok(self.special_dir_entry(INODE_TAGS)),
+        match parent {
+            inode if inode == ROOT_ID => match name {
+                b"commits" => Ok(self.synthetic_dir_entry(INODE_COMMITS)),
+                b"branches" => Ok(self.synthetic_dir_entry(INODE_BRANCHES)),
+                b"tags" => Ok(self.synthetic_dir_entry(INODE_TAGS)),
                 b"HEAD" => self.head_entry(),
                 _ => Err(io::Error::from_raw_os_error(libc::ENOENT)),
-            };
+            },
+            inode if inode == INODE_COMMITS => self.lookup_commit(name),
+            inode if inode == INODE_BRANCHES => self.lookup_reference(name, RefNamespace::Branches),
+            inode if inode == INODE_TAGS => self.lookup_reference(name, RefNamespace::Tags),
+            other => self.lookup_child(other, name),
         }
-
-        if parent == INODE_COMMITS {
-            return self.lookup_commit(name);
-        }
-
-        if parent == INODE_BRANCHES {
-            let refs = self.repo.list_branches().map_err(io::Error::other)?;
-            return self.lookup_reference_symlink(name, NAMESPACE_BRANCH, refs);
-        }
-
-        if parent == INODE_TAGS {
-            let refs = self.repo.list_tags().map_err(io::Error::other)?;
-            return self.lookup_reference_symlink(name, NAMESPACE_TAG, refs);
-        }
-
-        let parent_node = self.node_for_inode(parent)?;
-        let (node, attr) = self.materialize_tree_child(&parent_node, name)?;
-        Ok(Self::make_entry(node.inode, attr))
-    }
-
-    fn getattr(
-        &self,
-        _ctx: &Context,
-        inode: Self::Inode,
-        _handle: Option<Self::Handle>,
-    ) -> io::Result<(stat64, Duration)> {
-        let attr = match inode {
-            ROOT_ID => self.root_attr(),
-            INODE_COMMITS | INODE_BRANCHES | INODE_TAGS => {
-                build_dir_attr(inode, DIRECTORY_ATTR_MODE, self.start_time)
-            }
-            INODE_HEAD => {
-                let (meta, target) = self.head_metadata()?;
-                build_symlink_attr(inode, SYMLINK_ATTR_MODE, meta.time, target.len() as u64)
-            }
-            _ => {
-                let node = self.node_for_inode(inode)?;
-                Self::attr_for_node(&node)
-            }
-        };
-        Ok((attr, ATTR_TTL))
     }
 
     fn setattr(
@@ -645,6 +465,24 @@ impl FileSystem for GitSnapFs {
         _valid: SetattrValid,
     ) -> io::Result<(stat64, Duration)> {
         Err(io::Error::from_raw_os_error(libc::EROFS))
+    }
+
+    fn readlink(&self, _ctx: &Context, inode: Self::Inode) -> io::Result<Vec<u8>> {
+        let inode = inode.into();
+        if inode == INODE_HEAD {
+            return self.head_target();
+        }
+        if let Ok(target) = self.reference_target(inode, RefNamespace::Branches) {
+            return Ok(target);
+        }
+        if let Ok(target) = self.reference_target(inode, RefNamespace::Tags) {
+            return Ok(target);
+        }
+
+        let oid = self.repo.resolve_inode(inode).map_err(io::Error::other)?;
+        let repo = self.repo.thread_local();
+        let blob = repo.find_blob(oid).map_err(io::Error::other)?;
+        Ok(blob.data.as_slice().to_vec())
     }
 
     fn symlink(
@@ -729,40 +567,53 @@ impl FileSystem for GitSnapFs {
         offset: u64,
         add_entry: &mut dyn FnMut(DirEntry) -> io::Result<usize>,
     ) -> io::Result<()> {
-        if inode == ROOT_ID {
-            return readdir_root(offset, add_entry);
+        let records = self.list_directory(inode)?;
+        for (index, record) in records.into_iter().enumerate() {
+            let entry_offset = index as u64;
+            if offset > entry_offset {
+                continue;
+            }
+            let dirent = DirEntry {
+                ino: record.ino,
+                offset: entry_offset + 1,
+                type_: record.dtype,
+                name: &record.name,
+            };
+            if add_entry(dirent)? == 0 {
+                break;
+            }
         }
-
-        if inode == INODE_COMMITS {
-            return self.readdir_commits(offset, add_entry);
-        }
-
-        if inode == INODE_BRANCHES {
-            let refs = self.repo.list_branches().map_err(io::Error::other)?;
-            return self.readdir_refs(offset, add_entry, refs, NAMESPACE_BRANCH);
-        }
-
-        if inode == INODE_TAGS {
-            let refs = self.repo.list_tags().map_err(io::Error::other)?;
-            return self.readdir_refs(offset, add_entry, refs, NAMESPACE_TAG);
-        }
-
-        let node = self.node_for_inode(inode)?;
-        self.readdir_node(&node, offset, add_entry)
+        Ok(())
     }
 
-    fn readlink(&self, _ctx: &Context, inode: Self::Inode) -> io::Result<Vec<u8>> {
-        if inode == INODE_HEAD {
-            let (_, target) = self.head_metadata()?;
-            return Ok(target);
-        }
-        let node = self.node_for_inode(inode)?;
-        match node.kind {
-            NodeKind::Symlink { target, .. } | NodeKind::SyntheticSymlink { target, .. } => {
-                Ok(target)
+    fn readdirplus(
+        &self,
+        _ctx: &Context,
+        inode: Self::Inode,
+        _handle: Self::Handle,
+        _size: u32,
+        offset: u64,
+        add_entry: &mut dyn FnMut(DirEntry, Entry) -> io::Result<usize>,
+    ) -> io::Result<()> {
+        let records = self.list_directory(inode)?;
+        for (index, record) in records.into_iter().enumerate() {
+            let entry_offset = index as u64;
+            if offset > entry_offset {
+                continue;
             }
-            _ => Err(io::Error::from_raw_os_error(libc::EINVAL)),
+            if let Some(entry) = record.entry {
+                let dirent = DirEntry {
+                    ino: record.ino,
+                    offset: entry_offset + 1,
+                    type_: record.dtype,
+                    name: &record.name,
+                };
+                if add_entry(dirent, entry)? == 0 {
+                    break;
+                }
+            }
         }
+        Ok(())
     }
 
     fn open(
@@ -778,17 +629,13 @@ impl FileSystem for GitSnapFs {
         if access_mode != libc::O_RDONLY {
             return Err(io::Error::from_raw_os_error(libc::EROFS));
         }
-
-        let inode_u64 = inode;
-        match inode_u64 {
-            ROOT_ID | INODE_COMMITS | INODE_BRANCHES | INODE_TAGS | INODE_HEAD => {}
-            _ => {
-                // Verify the inode exists for regular Git-backed objects.
-                let _ = self.node_for_inode(inode_u64)?;
-            }
+        let oid = self.repo.resolve_inode(inode).map_err(io::Error::other)?;
+        let repo = self.repo.thread_local();
+        let object = repo.find_object(oid).map_err(io::Error::other)?;
+        if !matches!(object.kind, gix::object::Kind::Blob) {
+            return Err(io::Error::from_raw_os_error(libc::EISDIR));
         }
-
-        Ok((Some(inode_u64), OpenOptions::empty(), None))
+        Ok((Some(inode), OpenOptions::empty(), None))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -803,14 +650,9 @@ impl FileSystem for GitSnapFs {
         _lock_owner: Option<u64>,
         _flags: u32,
     ) -> io::Result<usize> {
-        let node = self.node_for_inode(inode)?;
-        let blob_oid = match node.kind {
-            NodeKind::Blob { ref oid, .. } => *oid,
-            _ => return Err(io::Error::from_raw_os_error(libc::EINVAL)),
-        };
-
+        let oid = self.repo.resolve_inode(inode).map_err(io::Error::other)?;
         let repo = self.repo.thread_local();
-        let blob = repo.find_blob(blob_oid).map_err(io::Error::other)?;
+        let blob = repo.find_blob(oid).map_err(io::Error::other)?;
         let data = blob.data.as_slice();
         let start =
             usize::try_from(offset).map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
@@ -862,36 +704,13 @@ impl FileSystem for GitSnapFs {
     }
 }
 
-fn readdir_root(
-    mut offset: u64,
-    add_entry: &mut dyn FnMut(DirEntry) -> io::Result<usize>,
-
-) -> io::Result<()> {
-
-    let synthetic_entries: &[(u64, u32, &[u8])] = &[
-        (INODE_COMMITS, u32::from(libc::DT_DIR), NAME_COMMITS),
-        (INODE_BRANCHES, u32::from(libc::DT_DIR), NAME_BRANCHES),
-        (INODE_TAGS, u32::from(libc::DT_DIR), NAME_TAGS),
-        (INODE_HEAD, u32::from(libc::DT_LNK), NAME_HEAD),
-    ];
-
-    for (index, (ino, ty, name)) in synthetic_entries.iter().enumerate() {
-        let entry_offset = index as u64;
-        if offset > entry_offset {
-            continue;
-        }
-        if add_entry(DirEntry {
-            ino: *ino,
-            offset: entry_offset + 1,
-            type_: *ty,
-            name,
-        })? == 0
-        {
-            return Ok(());
-        }
-    }
-
-    Ok(())
+fn synthetic_inode(namespace: u8, name: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    namespace.hash(&mut hasher);
+    name.hash(&mut hasher);
+    let hash = hasher.finish();
+    (u64::from(namespace) << 56) | (hash & 0x00FF_FFFF_FFFF_FFFF)
 }
 
 fn build_dir_attr(inode: u64, mode: u32, time: SystemTime) -> stat64 {
@@ -972,23 +791,4 @@ fn time_to_unix_parts(time: SystemTime) -> (i64, i64) {
 
 fn saturating_i64_from_u64(value: u64) -> i64 {
     i64::try_from(value).unwrap_or(i64::MAX)
-}
-
-fn commit_time_to_system(commit: &gix::Commit<'_>, default: SystemTime) -> SystemTime {
-    match commit.committer() {
-        Ok(signature) => match signature.time() {
-            Ok(time) => seconds_to_system_time(time.seconds),
-            Err(_) => default,
-        },
-        Err(_) => default,
-    }
-}
-
-fn seconds_to_system_time(seconds: i64) -> SystemTime {
-    let duration = Duration::from_secs(seconds.unsigned_abs());
-    if seconds >= 0 {
-        UNIX_EPOCH + duration
-    } else {
-        UNIX_EPOCH - duration
-    }
 }

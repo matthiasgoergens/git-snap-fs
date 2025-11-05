@@ -10,6 +10,8 @@ use anyhow::{anyhow, Context, Result};
 use gix::{bstr::ByteSlice, ObjectId, ThreadSafeRepository};
 use gix::{revision::walk::Sorting, traverse::commit::simple::CommitTimeOrder};
 
+use crate::inode::inode_to_hex_prefix;
+
 /// Minimal repository wrapper that keeps a thread-safe handle.
 #[derive(Debug)]
 pub struct Repository {
@@ -132,6 +134,14 @@ impl Repository {
 
     pub fn thread_local(&self) -> gix::Repository {
         self.inner.to_thread_local()
+    }
+
+    /// Resolve an inode value back to a unique object id by treating it as a hexadecimal prefix.
+    pub fn resolve_inode(&self, inode: u64) -> Result<ObjectId> {
+        let hex = inode_to_hex_prefix(inode);
+        let repo = self.inner.to_thread_local();
+        let id = repo.rev_parse_single(hex.as_bytes().as_bstr())?.detach();
+        Ok(id)
     }
 }
 

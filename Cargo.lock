@@ -484,7 +484,6 @@ dependencies = [
  "libc",
  "nix 0.28.0",
  "once_cell",
- "parking_lot",
  "predicates",
  "serde",
  "serde_json",
