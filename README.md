@@ -10,13 +10,13 @@ GitSnapFS exposes snapshots of a Git repository as a read-only filesystem design
 
 ### Building & Running
 
-Implementation is in progress. Once the Rust code is added you will be able to:
+Implementation is in progress. A minimal FUSE server is available and can be exercised with:
 
 ```
-cargo run -- --repo <path-to-git-dir> --mountpoint <mountpoint>
+cargo run -- --repo <path-to-git-dir> --mountpoint <existing-empty-dir>
 ```
 
-The filesystem depends on `fuse-backend-rs` for FUSE plumbing and `gitoxide` (`gix`) for repository access. Additional CLI flags will control cache TTLs, allow-other mounts, and takeover of existing FUSE file descriptors.
+This mounts the Git repository as a read-only filesystem and already exposes the root directories (`commits`, `branches`, `tags`, `HEAD`). Unmount with `fusermount -u <mountpoint>` when done. The server currently relies on `fuse-backend-rs` for FUSE plumbing and `gitoxide` (`gix`) for repository access.
 
 ### Development Notes
 

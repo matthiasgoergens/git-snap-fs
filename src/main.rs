@@ -1,8 +1,15 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use clap::Parser;
+use fuse_backend_rs::api::server::Server;
+use fuse_backend_rs::transport::FuseSession;
+use tracing::error;
 use tracing_subscriber::EnvFilter;
+
+use gitsnapfs::fs::GitSnapFs;
+use gitsnapfs::repo::Repository;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -40,14 +47,69 @@ fn main() -> Result<()> {
         .with_target(false)
         .init();
 
+    if cli.takeover_fuse_fd.is_some() {
+        bail!("takeover via existing FUSE fd is not supported yet in the MVP");
+    }
+
+    let repo = Repository::open(&cli.repo)?;
+    let fs = GitSnapFs::new(repo);
+
     tracing::info!(
-        "GitSnapFS starting (repo: {}, mountpoint: {})",
+        "GitSnapFS mounting (repo: {}, mountpoint: {})",
         cli.repo.display(),
         cli.mountpoint.display()
     );
 
-    // Actual FUSE mounting and event loop will be implemented in later steps.
-    tracing::warn!("GitSnapFS is not yet fully implemented.");
+    let runtime = FuseRuntime::new(fs, &cli.mountpoint, cli.allow_other)?;
+    runtime.serve()
+}
 
-    Ok(())
+struct FuseRuntime {
+    server: Arc<Server<Arc<GitSnapFs>>>,
+    session: FuseSession,
+}
+
+impl FuseRuntime {
+    fn new(fs: GitSnapFs, mountpoint: &Path, allow_other: bool) -> Result<Self> {
+        let server = Arc::new(Server::new(Arc::new(fs)));
+        let mut session = FuseSession::new(mountpoint, "gitsnapfs", "gitsnapfs", true)?;
+        session.set_allow_other(allow_other);
+        session.mount()?;
+        Ok(Self { server, session })
+    }
+
+    fn serve(self) -> Result<()> {
+        let mut channel = self.session.new_channel()?;
+        loop {
+            match channel.get_request()? {
+                Some((reader, writer)) => {
+                    if let Err(e) = self
+                        .server
+                        .handle_message(reader, writer.into(), None, None)
+                    {
+                        match e {
+                            fuse_backend_rs::Error::EncodeMessage(ioe)
+                                if ioe.raw_os_error() == Some(libc::EBADF) =>
+                            {
+                                break;
+                            }
+                            other => {
+                                error!(?other, "handling FUSE message failed");
+                            }
+                        }
+                    }
+                }
+                None => break,
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Drop for FuseRuntime {
+    fn drop(&mut self) {
+        if let Err(err) = self.session.umount() {
+            error!(?err, "failed to unmount FUSE session");
+        }
+    }
 }

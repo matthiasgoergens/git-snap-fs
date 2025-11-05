@@ -47,6 +47,10 @@ enum NodeKind {
         meta: Arc<CommitMeta>,
         oid: ObjectId,
     },
+    SyntheticSymlink {
+        target: Vec<u8>,
+        time: SystemTime,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -64,6 +68,9 @@ const INODE_COMMITS: u64 = 2;
 const INODE_BRANCHES: u64 = 3;
 const INODE_TAGS: u64 = 4;
 const INODE_HEAD: u64 = 5;
+
+const NAMESPACE_BRANCH: u8 = 1;
+const NAMESPACE_TAG: u8 = 2;
 
 const ENTRY_TTL: Duration = Duration::from_secs(1);
 const ATTR_TTL: Duration = Duration::from_secs(1);
@@ -136,8 +143,8 @@ impl GitSnapFs {
             .resolve_full_commit_id(name_str)
             .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
 
-        let commit = self
-            .repo
+        let repo = self.repo.thread_local();
+        let commit = repo
             .find_commit(commit_id.clone())
             .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
         let tree_id = commit
@@ -183,9 +190,8 @@ impl GitSnapFs {
             }
         };
 
-        let tree = self
-            .repo
-            .inner()
+        let repo = self.repo.thread_local();
+        let tree = repo
             .find_tree(tree_id.clone())
             .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
 
@@ -208,6 +214,8 @@ impl GitSnapFs {
         let child_oid: ObjectId = oid_raw.into();
         let child_inode = inode_from_oid(&child_oid);
 
+        drop(tree);
+
         if let Some(existing) = self.nodes.read().get(&child_inode) {
             let attr = self.attr_for_node(existing)?;
             return Ok((existing.clone(), attr));
@@ -229,9 +237,7 @@ impl GitSnapFs {
                 (node, attr)
             }
             EntryKind::Blob | EntryKind::BlobExecutable => {
-                let blob = self
-                    .repo
-                    .inner()
+                let blob = repo
                     .find_blob(child_oid.clone())
                     .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
                 let executable = matches!(kind, EntryKind::BlobExecutable);
@@ -255,9 +261,7 @@ impl GitSnapFs {
                 (node, attr)
             }
             EntryKind::Link => {
-                let blob = self
-                    .repo
-                    .inner()
+                let blob = repo
                     .find_blob(child_oid.clone())
                     .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
                 let target = blob.data.clone();
@@ -373,9 +377,8 @@ impl GitSnapFs {
             }
         };
 
-        let tree = self
-            .repo
-            .inner()
+        let repo = self.repo.thread_local();
+        let tree = repo
             .find_tree(tree_id)
             .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
 
@@ -405,6 +408,8 @@ impl GitSnapFs {
                 return Ok(());
             }
         }
+
+        drop(tree);
 
         Ok(())
     }
@@ -510,9 +515,8 @@ impl FileSystem for GitSnapFs {
             _ => return Err(io::Error::from_raw_os_error(libc::EINVAL)),
         };
 
-        let blob = self
-            .repo
-            .inner()
+        let repo = self.repo.thread_local();
+        let blob = repo
             .find_blob(blob_oid)
             .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
         let data = blob.data.as_slice();
