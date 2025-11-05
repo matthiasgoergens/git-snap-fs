@@ -11,9 +11,8 @@ use gix::ObjectId;
 #[must_use]
 pub fn inode_from_oid(oid: &ObjectId) -> u64 {
     let bytes = oid.as_bytes();
-    let len = bytes.len();
     let mut buf = [0u8; 8];
-    buf.copy_from_slice(&bytes[len - 8..]);
+    buf.copy_from_slice(&bytes[..8]);
     u64::from_be_bytes(buf)
 }
 
@@ -37,7 +36,7 @@ mod tests {
     fn inode_roundtrip_low_bits() {
         let object = oid("0123456789abcdef0123456789abcdef01234567");
         let ino = inode_from_oid(&object);
-        assert_eq!(ino, 0x89ab_cdef_0123_4567);
-        assert_eq!(inode_to_hex_prefix(ino), "89abcdef01234567");
+        assert_eq!(ino, 0x0123_4567_89ab_cdef);
+        assert_eq!(inode_to_hex_prefix(ino), "0123456789abcdef");
     }
 }

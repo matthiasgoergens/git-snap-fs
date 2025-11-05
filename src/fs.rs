@@ -22,7 +22,7 @@ use crate::inode::inode_from_oid;
 use crate::repo::Repository;
 
 #[derive(Debug, Clone, Copy)]
-struct CommitMeta {
+struct CommitMeta { // FIXME: why do we need this?  Remove.  It doesn't even have the right name.s
     id: ObjectId,
     tree: ObjectId,
     time: SystemTime,
