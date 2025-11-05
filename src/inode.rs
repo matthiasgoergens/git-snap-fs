@@ -8,6 +8,7 @@
 use gix::ObjectId;
 
 /// Convert a Git object id into a 64-bit inode by taking the low 64 bits.
+#[must_use]
 pub fn inode_from_oid(oid: &ObjectId) -> u64 {
     let bytes = oid.as_bytes();
     let len = bytes.len();
@@ -18,6 +19,7 @@ pub fn inode_from_oid(oid: &ObjectId) -> u64 {
 
 /// Render the inode as a hexadecimal prefix string suitable for prefix
 /// resolution in the Git object database.
+#[must_use]
 pub fn inode_to_hex_prefix(ino: u64) -> String {
     format!("{ino:016x}")
 }
@@ -35,7 +37,7 @@ mod tests {
     fn inode_roundtrip_low_bits() {
         let object = oid("0123456789abcdef0123456789abcdef01234567");
         let ino = inode_from_oid(&object);
-        assert_eq!(ino, 0x89abcdef01234567);
+        assert_eq!(ino, 0x89ab_cdef_0123_4567);
         assert_eq!(inode_to_hex_prefix(ino), "89abcdef01234567");
     }
 }

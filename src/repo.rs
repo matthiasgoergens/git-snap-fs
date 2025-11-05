@@ -1,4 +1,4 @@
-//! Repository access helpers for GitSnapFS.
+//! Repository access helpers for `GitSnapFS`.
 //!
 //! These abstractions wrap `gix` primitives so the filesystem code can remain
 //! largely agnostic of the underlying git library.
@@ -15,12 +15,22 @@ pub struct Repository {
 }
 
 impl Repository {
+    /// Open a repository at `path`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `gix` cannot open the repository at the given path.
     pub fn open(path: &Path) -> Result<Self> {
         let repo = ThreadSafeRepository::open(path)
             .with_context(|| format!("failed to open repository at {}", path.display()))?;
         Ok(Self { inner: repo })
     }
 
+    /// Resolve a hex commit id string to its full 40-byte `ObjectId`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the hex string does not point to a commit reachable in the repository.
     pub fn resolve_full_commit_id(&self, hex: &str) -> Result<ObjectId> {
         let repo = self.inner.to_thread_local();
         let id = repo.rev_parse_single(hex.as_bytes().as_bstr())?.detach();
@@ -28,6 +38,11 @@ impl Repository {
         Ok(commit.id)
     }
 
+    /// Resolve the current `HEAD` reference to its commit `ObjectId`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `HEAD` cannot be peeled to a commit (for example in an unborn branch).
     pub fn resolve_head(&self) -> Result<ObjectId> {
         let repo = self.inner.to_thread_local();
         let mut head = repo.head()?;
@@ -39,6 +54,11 @@ impl Repository {
         Ok(commit.id)
     }
 
+    /// Enumerate local branches and the commits they reference.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the reference database cannot be enumerated.
     pub fn list_branches(&self) -> Result<Vec<(String, ObjectId)>> {
         let repo = self.inner.to_thread_local();
         let platform = repo.references()?;
@@ -46,6 +66,11 @@ impl Repository {
         collect_refs(iter, b"refs/heads/")
     }
 
+    /// Enumerate tags and the commits they reference.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the reference database cannot be enumerated.
     pub fn list_tags(&self) -> Result<Vec<(String, ObjectId)>> {
         let repo = self.inner.to_thread_local();
         let platform = repo.references()?;

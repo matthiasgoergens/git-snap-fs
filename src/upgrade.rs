@@ -8,6 +8,10 @@ use nix::fcntl::{fcntl, FcntlArg, FdFlag};
 use nix::unistd::{dup, execv};
 
 /// Clears the CLOEXEC flag on the provided file descriptor so it survives an exec.
+///
+/// # Errors
+///
+/// Returns an error if `fcntl` fails while reading or updating the descriptor flags.
 pub fn clear_cloexec(fd: RawFd) -> Result<()> {
     let flags = FdFlag::from_bits_truncate(fcntl(fd, FcntlArg::F_GETFD)?);
     if !flags.contains(FdFlag::FD_CLOEXEC) {
@@ -21,6 +25,10 @@ pub fn clear_cloexec(fd: RawFd) -> Result<()> {
 }
 
 /// Executes the current binary again, passing the provided environment overrides.
+///
+/// # Errors
+///
+/// Returns an error if the path contains interior NUL bytes or if `execv` fails.
 pub fn exec_with_env(path: &Path, env: &[(&str, &str)]) -> Result<()> {
     let c_path = CString::new(path.as_os_str().as_bytes())
         .context("failed to convert exec path to CString")?;
@@ -34,7 +42,11 @@ pub fn exec_with_env(path: &Path, env: &[(&str, &str)]) -> Result<()> {
     Ok(())
 }
 
-/// Helper that ensures the FD stays open across upgrades by dup'ing into an OwnedFd.
+/// Helper that ensures the FD stays open across upgrades by dup'ing into an `OwnedFd`.
+///
+/// # Errors
+///
+/// Returns an error if duplicating the file descriptor fails.
 pub fn dup_fd(fd: RawFd) -> Result<OwnedFd> {
     let duped = dup(fd)?;
     Ok(unsafe { OwnedFd::from_raw_fd(duped) })

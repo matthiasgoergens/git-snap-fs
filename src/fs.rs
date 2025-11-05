@@ -1,6 +1,7 @@
-//! FUSE filesystem implementation for GitSnapFS.
+//! FUSE filesystem implementation for `GitSnapFS`.
 
 use std::collections::HashMap;
+use std::convert::TryFrom;
 use std::ffi::CStr;
 use std::io;
 use std::str;
@@ -142,7 +143,7 @@ impl GitSnapFs {
         })
     }
 
-    fn make_entry(&self, inode: u64, attr: stat64) -> Entry {
+    fn make_entry(inode: u64, attr: stat64) -> Entry {
         Entry {
             inode,
             generation: 0,
@@ -164,7 +165,7 @@ impl GitSnapFs {
 
         let (meta, inode) = self.ensure_commit_node(commit_id)?;
         let attr = build_dir_attr(inode, DIRECTORY_ATTR_MODE, meta.time);
-        Ok(self.make_entry(inode, attr))
+        Ok(Self::make_entry(inode, attr))
     }
 
     fn ensure_commit_node(&self, commit_id: ObjectId) -> io::Result<(Arc<CommitMeta>, u64)> {
@@ -232,7 +233,7 @@ impl GitSnapFs {
         self.nodes.write().insert(inode, node);
 
         let attr = build_symlink_attr(inode, SYMLINK_ATTR_MODE, meta.time, target.len() as u64);
-        Ok(self.make_entry(inode, attr))
+        Ok(Self::make_entry(inode, attr))
     }
 
     fn readdir_refs(
@@ -247,7 +248,7 @@ impl GitSnapFs {
             if add_entry(DirEntry {
                 ino: dir_inode,
                 offset: 1,
-                type_: libc::DT_DIR as u32,
+                type_: u32::from(libc::DT_DIR),
                 name: NAME_DOT,
             })? == 0
             {
@@ -260,7 +261,7 @@ impl GitSnapFs {
             if add_entry(DirEntry {
                 ino: ROOT_ID,
                 offset: 2,
-                type_: libc::DT_DIR as u32,
+                type_: u32::from(libc::DT_DIR),
                 name: NAME_DOT_DOT,
             })? == 0
             {
@@ -297,7 +298,7 @@ impl GitSnapFs {
             if add_entry(DirEntry {
                 ino: inode,
                 offset: entry_offset + 1,
-                type_: libc::DT_LNK as u32,
+                type_: u32::from(libc::DT_LNK),
                 name: name_bytes,
             })? == 0
             {
@@ -317,7 +318,7 @@ impl GitSnapFs {
             if add_entry(DirEntry {
                 ino: INODE_COMMITS,
                 offset: 1,
-                type_: libc::DT_DIR as u32,
+                type_: u32::from(libc::DT_DIR),
                 name: NAME_DOT,
             })? == 0
             {
@@ -330,7 +331,7 @@ impl GitSnapFs {
             if add_entry(DirEntry {
                 ino: ROOT_ID,
                 offset: 2,
-                type_: libc::DT_DIR as u32,
+                type_: u32::from(libc::DT_DIR),
                 name: NAME_DOT_DOT,
             })? == 0
             {
@@ -364,7 +365,7 @@ impl GitSnapFs {
             if add_entry(DirEntry {
                 ino: *inode,
                 offset: entry_offset + 1,
-                type_: libc::DT_DIR as u32,
+                type_: u32::from(libc::DT_DIR),
                 name: name.as_slice(),
             })? == 0
             {
@@ -379,11 +380,10 @@ impl GitSnapFs {
         let (meta, tree_id) = match &parent.kind {
             NodeKind::Commit { meta } => (meta.clone(), meta.tree),
             NodeKind::Tree { meta, tree } => (meta.clone(), *tree),
-            NodeKind::Submodule { .. } => return Err(io::Error::from_raw_os_error(libc::ENOTDIR)),
-            NodeKind::Blob { .. } | NodeKind::Symlink { .. } => {
-                return Err(io::Error::from_raw_os_error(libc::ENOTDIR))
-            }
-            NodeKind::SyntheticSymlink { .. } => {
+            NodeKind::Submodule { .. }
+            | NodeKind::Blob { .. }
+            | NodeKind::Symlink { .. }
+            | NodeKind::SyntheticSymlink { .. } => {
                 return Err(io::Error::from_raw_os_error(libc::ENOTDIR))
             }
         };
@@ -391,29 +391,23 @@ impl GitSnapFs {
         let repo = self.repo.thread_local();
         let tree = repo.find_tree(tree_id).map_err(io::Error::other)?;
 
-        let mut found_mode: Option<EntryMode> = None;
-        let mut found_oid = None;
+        let mut entry_info: Option<(EntryMode, ObjectId)> = None;
         for entry in tree.iter() {
             let entry = entry.map_err(io::Error::other)?;
             if entry.inner.filename.as_bytes() == name {
-                found_mode = Some(entry.inner.mode);
-                found_oid = Some(entry.inner.oid.to_owned());
+                entry_info = Some((entry.inner.mode, entry.inner.oid.to_owned()));
                 break;
             }
         }
 
-        let mode = match found_mode {
-            Some(mode) => mode,
-            None => return Err(io::Error::from_raw_os_error(libc::ENOENT)),
+        let Some((mode, oid_raw)) = entry_info else {
+            return Err(io::Error::from_raw_os_error(libc::ENOENT));
         };
-        let oid_raw = found_oid.expect("mode implies oid");
         let child_oid: ObjectId = oid_raw;
         let child_inode = inode_from_oid(&child_oid);
 
-        drop(tree);
-
         if let Some(existing) = self.nodes.read().get(&child_inode) {
-            let attr = self.attr_for_node(existing)?;
+            let attr = Self::attr_for_node(existing);
             return Ok((existing.clone(), attr));
         }
 
@@ -487,12 +481,12 @@ impl GitSnapFs {
         Ok((node, attr))
     }
 
-    fn attr_for_node(&self, node: &Node) -> io::Result<stat64> {
+    fn attr_for_node(node: &Node) -> stat64 {
         match &node.kind {
             NodeKind::Commit { meta }
             | NodeKind::Tree { meta, .. }
             | NodeKind::Submodule { meta, .. } => {
-                Ok(build_dir_attr(node.inode, DIRECTORY_ATTR_MODE, meta.time))
+                build_dir_attr(node.inode, DIRECTORY_ATTR_MODE, meta.time)
             }
             NodeKind::Blob {
                 meta,
@@ -505,20 +499,17 @@ impl GitSnapFs {
                 } else {
                     S_IFREG | 0o444
                 };
-                Ok(build_file_attr(node.inode, mode, *size, meta.time))
+                build_file_attr(node.inode, mode, *size, meta.time)
             }
-            NodeKind::Symlink { meta, target, .. } => Ok(build_symlink_attr(
+            NodeKind::Symlink { meta, target, .. } => build_symlink_attr(
                 node.inode,
                 SYMLINK_ATTR_MODE,
                 meta.time,
                 target.len() as u64,
-            )),
-            NodeKind::SyntheticSymlink { target, time } => Ok(build_symlink_attr(
-                node.inode,
-                SYMLINK_ATTR_MODE,
-                *time,
-                target.len() as u64,
-            )),
+            ),
+            NodeKind::SyntheticSymlink { target, time } => {
+                build_symlink_attr(node.inode, SYMLINK_ATTR_MODE, *time, target.len() as u64)
+            }
         }
     }
 
@@ -541,7 +532,7 @@ impl GitSnapFs {
             if add_entry(DirEntry {
                 ino: node.inode,
                 offset: 1,
-                type_: libc::DT_DIR as u32,
+                type_: u32::from(libc::DT_DIR),
                 name: NAME_DOT,
             })? == 0
             {
@@ -554,7 +545,7 @@ impl GitSnapFs {
             if add_entry(DirEntry {
                 ino: parent_inode,
                 offset: 2,
-                type_: libc::DT_DIR as u32,
+                type_: u32::from(libc::DT_DIR),
                 name: NAME_DOT_DOT,
             })? == 0
             {
@@ -566,11 +557,10 @@ impl GitSnapFs {
         let tree_id = match &node.kind {
             NodeKind::Commit { meta } => meta.tree,
             NodeKind::Tree { tree, .. } => *tree,
-            NodeKind::Submodule { .. } => return Ok(()),
+            NodeKind::Submodule { .. } | NodeKind::SyntheticSymlink { .. } => return Ok(()),
             NodeKind::Blob { .. } | NodeKind::Symlink { .. } => {
                 return Err(io::Error::from_raw_os_error(libc::ENOTDIR))
             }
-            NodeKind::SyntheticSymlink { .. } => return Ok(()),
         };
 
         let repo = self.repo.thread_local();
@@ -595,7 +585,7 @@ impl GitSnapFs {
             if add_entry(DirEntry {
                 ino: child.inode,
                 offset: entry_offset + 1,
-                type_: entry_type as u32,
+                type_: u32::from(entry_type),
                 name: filename,
             })? == 0
             {
@@ -646,7 +636,7 @@ impl FileSystem for GitSnapFs {
 
         let parent_node = self.node_for_inode(parent)?;
         let (node, attr) = self.materialize_tree_child(&parent_node, name)?;
-        Ok(self.make_entry(node.inode, attr))
+        Ok(Self::make_entry(node.inode, attr))
     }
 
     fn getattr(
@@ -666,7 +656,7 @@ impl FileSystem for GitSnapFs {
             }
             _ => {
                 let node = self.node_for_inode(inode)?;
-                self.attr_for_node(&node)?
+                Self::attr_for_node(&node)
             }
         };
         Ok((attr, ATTR_TTL))
@@ -808,8 +798,10 @@ impl FileSystem for GitSnapFs {
         flags: u32,
         _fuse_flags: u32,
     ) -> io::Result<(Option<Self::Handle>, OpenOptions, Option<u32>)> {
-        let access_mode = flags & libc::O_ACCMODE as u32;
-        if access_mode != libc::O_RDONLY as u32 {
+        let flag_bits =
+            i32::try_from(flags).map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
+        let access_mode = flag_bits & libc::O_ACCMODE;
+        if access_mode != libc::O_RDONLY {
             return Err(io::Error::from_raw_os_error(libc::EROFS));
         }
 
@@ -885,11 +877,12 @@ impl FileSystem for GitSnapFs {
     }
 
     fn access(&self, _ctx: &Context, _inode: Self::Inode, mask: u32) -> io::Result<()> {
-        if (mask & (libc::W_OK as u32)) != 0 {
-            Err(io::Error::from_raw_os_error(libc::EROFS))
-        } else {
-            Ok(())
+        let mask_bits =
+            i32::try_from(mask).map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
+        if (mask_bits & libc::W_OK) != 0 {
+            return Err(io::Error::from_raw_os_error(libc::EROFS));
         }
+        Ok(())
     }
 }
 
@@ -901,7 +894,7 @@ fn readdir_root(
         if add_entry(DirEntry {
             ino: ROOT_ID,
             offset: 1,
-            type_: libc::DT_DIR as u32,
+            type_: u32::from(libc::DT_DIR),
             name: NAME_DOT,
         })? == 0
         {
@@ -913,7 +906,7 @@ fn readdir_root(
         if add_entry(DirEntry {
             ino: ROOT_ID,
             offset: 2,
-            type_: libc::DT_DIR as u32,
+            type_: u32::from(libc::DT_DIR),
             name: NAME_DOT_DOT,
         })? == 0
         {
@@ -923,10 +916,10 @@ fn readdir_root(
     }
 
     let synthetic_entries: &[(u64, u32, &[u8])] = &[
-        (INODE_COMMITS, libc::DT_DIR as u32, NAME_COMMITS),
-        (INODE_BRANCHES, libc::DT_DIR as u32, NAME_BRANCHES),
-        (INODE_TAGS, libc::DT_DIR as u32, NAME_TAGS),
-        (INODE_HEAD, libc::DT_LNK as u32, NAME_HEAD),
+        (INODE_COMMITS, u32::from(libc::DT_DIR), NAME_COMMITS),
+        (INODE_BRANCHES, u32::from(libc::DT_DIR), NAME_BRANCHES),
+        (INODE_TAGS, u32::from(libc::DT_DIR), NAME_TAGS),
+        (INODE_HEAD, u32::from(libc::DT_LNK), NAME_HEAD),
     ];
 
     for (index, (ino, ty, name)) in synthetic_entries.iter().enumerate() {
@@ -1029,9 +1022,10 @@ fn commit_time_to_system(commit: &gix::Commit<'_>, default: SystemTime) -> Syste
 }
 
 fn seconds_to_system_time(seconds: i64) -> SystemTime {
+    let duration = Duration::from_secs(seconds.unsigned_abs());
     if seconds >= 0 {
-        UNIX_EPOCH + Duration::from_secs(seconds as u64)
+        UNIX_EPOCH + duration
     } else {
-        UNIX_EPOCH - Duration::from_secs(seconds.unsigned_abs())
+        UNIX_EPOCH - duration
     }
 }
