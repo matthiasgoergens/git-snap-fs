@@ -5,30 +5,43 @@
 //! evolving; the initial implementation focuses on the bare minimum needed
 //! for the FUSE bindings to resolve commits and trees lazily.
 
-use anyhow::Result;
-use gix::object::tree::EntryMode;
-use gix::ObjectId;
+use std::path::Path;
 
-/// Metadata for a single tree entry queried from the repository.
-#[derive(Debug, Clone)]
-pub struct TreeEntry {
-    pub mode: EntryMode,
-    pub oid: ObjectId,
-    pub name: String,
-}
+use anyhow::{anyhow, Context, Result};
+use gix::{bstr::ByteSlice, Commit, ObjectId};
 
-/// Minimal repository wrapper. The complete functionality will arrive in later
-/// steps; for now we only keep enough structure in place to let the rest of
-/// the crate compile.
+/// Minimal repository wrapper.
 #[derive(Debug)]
 pub struct Repository {
     inner: gix::Repository,
 }
 
 impl Repository {
-    pub fn open(path: &std::path::Path) -> Result<Self> {
-        let repo = gix::open(path)?;
+    pub fn open(path: &Path) -> Result<Self> {
+        let repo = gix::open(path).with_context(|| format!("failed to open repository at {}", path.display()))?;
         Ok(Self { inner: repo })
+    }
+
+    pub fn find_commit(&self, id: ObjectId) -> Result<Commit<'_>> {
+        Ok(self.inner.find_commit(id)?)
+    }
+
+    pub fn resolve_full_commit_id(&self, hex: &str) -> Result<ObjectId> {
+        let id = self.inner.rev_parse_single(hex.as_bytes().as_bstr())?.detach();
+        // Ensure the target is a commit; this surfaces a clearer error if the
+        // id resolves to a blob/tree/tag.
+        let commit = self.inner.find_commit(id)?;
+        Ok(commit.id)
+    }
+
+    pub fn resolve_head(&self) -> Result<ObjectId> {
+        let mut head = self.inner.head()?;
+        let id = head
+            .try_peel_to_id()?
+            .ok_or_else(|| anyhow!("repository HEAD is unborn and has no target commit"))?
+            .detach();
+        let commit = self.inner.find_commit(id)?;
+        Ok(commit.id)
     }
 
     pub fn inner(&self) -> &gix::Repository {

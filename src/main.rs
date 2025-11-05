@@ -23,26 +23,6 @@ struct Cli {
     #[arg(long)]
     allow_other: bool,
 
-    /// Attribute TTL in seconds for commit tree entries.
-    #[arg(long, default_value_t = 300)]
-    attr_ttl: u64,
-
-    /// Entry TTL in seconds for commit tree entries.
-    #[arg(long, default_value_t = 300)]
-    entry_ttl: u64,
-
-    /// TTL in seconds for branch/tag resolutions.
-    #[arg(long, default_value_t = 2)]
-    ref_ttl: u64,
-
-    /// Maximum number of tree objects cached in memory.
-    #[arg(long, default_value_t = 4096)]
-    tree_cache: usize,
-
-    /// Cache capacity for small blobs in bytes.
-    #[arg(long, default_value_t = 134_217_728)]
-    blob_small_cache: usize,
-
     /// Adopt an existing FUSE file descriptor instead of mounting.
     #[arg(long)]
     takeover_fuse_fd: Option<i32>,
