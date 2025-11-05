@@ -1,6 +1,6 @@
 //! FUSE filesystem implementation for `GitSnapFS`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::convert::TryFrom;
 use std::ffi::CStr;
 use std::io;
@@ -340,33 +340,44 @@ impl GitSnapFs {
             offset = 2;
         }
 
-        let mut commits = {
+        let repo_commits = self.repo.list_commits().map_err(io::Error::other)?;
+
+        let mut seen = HashSet::new();
+        let mut commit_ids = Vec::new();
+
+        for id in repo_commits {
+            if seen.insert(id) {
+                commit_ids.push(id);
+            }
+        }
+
+        {
             let nodes = self.nodes.read();
-            nodes
-                .values()
-                .filter_map(|node| {
-                    if let NodeKind::Commit { meta } = &node.kind {
-                        Some((meta.id.to_string().into_bytes(), node.inode))
-                    } else {
-                        None
+            for node in nodes.values() {
+                if let NodeKind::Commit { meta } = &node.kind {
+                    if seen.insert(meta.id) {
+                        commit_ids.push(meta.id);
                     }
-                })
-                .collect::<Vec<_>>()
-        };
+                }
+            }
+        }
 
-        commits.sort_by(|a, b| a.0.cmp(&b.0));
+        commit_ids.sort();
 
-        for (index, (name, inode)) in commits.iter().enumerate() {
+        for (index, commit_id) in commit_ids.iter().enumerate() {
             let entry_offset = (index as u64) + 3;
             if offset > entry_offset {
                 continue;
             }
 
+            let (meta, inode) = self.ensure_commit_node(*commit_id)?;
+            let name = meta.id.to_string();
+
             if add_entry(DirEntry {
-                ino: *inode,
+                ino: inode,
                 offset: entry_offset + 1,
                 type_: u32::from(libc::DT_DIR),
-                name: name.as_slice(),
+                name: name.as_bytes(),
             })? == 0
             {
                 return Ok(());
