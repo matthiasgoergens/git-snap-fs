@@ -12,6 +12,7 @@ use fuse_backend_rs::api::filesystem::{
 };
 use gix::bstr::ByteSlice;
 use gix::object::tree::{EntryKind, EntryMode};
+use gix::object::Kind;
 use gix::ObjectId;
 use libc::{S_IFDIR, S_IFLNK, S_IFREG};
 
@@ -428,6 +429,70 @@ impl GitSnapFs {
         }
         Err(io::Error::from_raw_os_error(libc::ENOENT))
     }
+
+    fn attr_for_inode(&self, inode: u64) -> io::Result<stat64> {
+        if inode == ROOT_ID {
+            return Ok(self.root_attr());
+        }
+        if inode == INODE_COMMITS || inode == INODE_BRANCHES || inode == INODE_TAGS {
+            return Ok(build_dir_attr(
+                inode,
+                DIRECTORY_ATTR_MODE,
+                self.mount_time,
+            ));
+        }
+        if inode == INODE_HEAD {
+            let target = self.head_target()?;
+            return Ok(build_symlink_attr(
+                INODE_HEAD,
+                SYMLINK_ATTR_MODE,
+                self.mount_time,
+                target.len() as u64,
+            ));
+        }
+        if let Ok(target) = self.reference_target(inode, RefNamespace::Branches) {
+            return Ok(build_symlink_attr(
+                inode,
+                SYMLINK_ATTR_MODE,
+                self.mount_time,
+                target.len() as u64,
+            ));
+        }
+        if let Ok(target) = self.reference_target(inode, RefNamespace::Tags) {
+            return Ok(build_symlink_attr(
+                inode,
+                SYMLINK_ATTR_MODE,
+                self.mount_time,
+                target.len() as u64,
+            ));
+        }
+
+        let oid = self.repo.resolve_inode(inode).map_err(io::Error::other)?;
+        let repo = self.repo.thread_local();
+        let object = repo.find_object(oid).map_err(io::Error::other)?;
+        match object.kind {
+            Kind::Commit | Kind::Tree => Ok(build_dir_attr(
+                inode,
+                DIRECTORY_ATTR_MODE,
+                self.mount_time,
+            )),
+            Kind::Blob => {
+                let blob = repo.find_blob(oid).map_err(io::Error::other)?;
+                Ok(build_file_attr(
+                    inode,
+                    S_IFREG | 0o444,
+                    blob.data.len() as u64,
+                    self.mount_time,
+                ))
+            }
+            Kind::Tag => Ok(build_file_attr(
+                inode,
+                S_IFREG | 0o444,
+                object.data.len() as u64,
+                self.mount_time,
+            )),
+        }
+    }
 }
 
 impl FileSystem for GitSnapFs {
@@ -454,6 +519,16 @@ impl FileSystem for GitSnapFs {
             inode if inode == INODE_TAGS => self.lookup_reference(name, RefNamespace::Tags),
             other => self.lookup_child(other, name),
         }
+    }
+
+    fn getattr(
+        &self,
+        _ctx: &Context,
+        inode: Self::Inode,
+        _handle: Option<Self::Handle>,
+    ) -> io::Result<(stat64, Duration)> {
+        let attr = self.attr_for_inode(inode)?;
+        Ok((attr, ATTR_TTL))
     }
 
     fn setattr(
