@@ -102,7 +102,7 @@ Expose a Git repository as a read-only filesystem:
 - **Cached** in kernel: use as much of FUSE’s caches as possible. Don’t do our own caching (unless profiling later suggests otherwise).  
 - **Times**: use commit’s committer time for entries beneath `/commits/<id>`; dirs `0555`; files `0444/0555`; symlinks `0777`. (But we can review this. Do whatever is simplest first.)
 - `cargo check` should pass without warnings, same for `cargo clippy --all-targets --all-features -- -D warnings`.
-- `cargo clippy --all-targets --all-features -- -D clippy::pedantic` should also pass without warnings, unless there is a good reason not to.  In that case, explain the reason in a comment and suppress the specific lint for that line or block..
+- `cargo clippy --all-targets --all-features -- -D clippy::pedantic` should also pass without warnings, unless there is a good reason not to.  In that case, explain the reason in a comment and suppress the specific lint for that line or block.  Do the same for `clippy::
 
 ### Freshness
 
@@ -139,8 +139,19 @@ Expose a Git repository as a read-only filesystem:
 ### CLI Examples
 
 ```
-gitsnapfs --repo /home/matthias/project/.git \
-          --mountpoint /mnt/gitfs
+mkdir /tmp/gitfs
+gitsnapfs --repo . \
+          --mountpoint /tmp/gitfs
 ```
 
 Decide how to trigger hot upgrades. E.g., by writing the new executable to a specific path that we expose in the fs. This would be the only writeable file. (Need to see how to do this atomically. Closing the fake “file” after writing it might be sufficient. Then we can write the new binary somewhere the kernel can use for exec, or use memfd.)
+
+### Open tasks
+
+Derive Copy for our datastructures, where possible.  No need for clone everywhere.
+
+Remove useless uses of `Arc`.
+
+Remove nodes: `RwLock<HashMap<u64, Node>>,` from `GitSnapFs`.  We can look up everything in gix on demand.
+
+Remove parent tracking from Node and in general: let fuse tell the kernel to handle that.

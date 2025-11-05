@@ -21,7 +21,7 @@ use parking_lot::RwLock;
 use crate::inode::inode_from_oid;
 use crate::repo::Repository;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 struct CommitMeta {
     id: ObjectId,
     tree: ObjectId,
@@ -31,24 +31,24 @@ struct CommitMeta {
 #[derive(Debug, Clone)]
 enum NodeKind {
     Commit {
-        meta: Arc<CommitMeta>,
+        meta: CommitMeta,
     },
     Tree {
-        meta: Arc<CommitMeta>,
+        meta: CommitMeta,
         tree: ObjectId,
     },
     Blob {
-        meta: Arc<CommitMeta>,
+        meta: CommitMeta,
         oid: ObjectId,
         executable: bool,
         size: u64,
     },
     Symlink {
-        meta: Arc<CommitMeta>,
+        meta: CommitMeta,
         target: Vec<u8>,
     },
     Submodule {
-        meta: Arc<CommitMeta>,
+        meta: CommitMeta,
         _oid: ObjectId,
     },
     SyntheticSymlink {
@@ -57,10 +57,10 @@ enum NodeKind {
     },
 }
 
+// FIXME: remove this.  It's useless, we can look up everything on demand in git.
 #[derive(Debug, Clone)]
 struct Node {
     inode: u64,
-    parent: Option<u64>,
     kind: NodeKind,
 }
 
@@ -89,6 +89,7 @@ const NAME_HEAD: &[u8] = b"HEAD";
 pub struct GitSnapFs {
     repo: Arc<Repository>,
     start_time: SystemTime,
+    // FIXME: drop this.  We can look up everything on demand in git.
     nodes: RwLock<HashMap<u64, Node>>,
 }
 
@@ -168,11 +169,11 @@ impl GitSnapFs {
         Ok(Self::make_entry(inode, attr))
     }
 
-    fn ensure_commit_node(&self, commit_id: ObjectId) -> io::Result<(Arc<CommitMeta>, u64)> {
+    fn ensure_commit_node(&self, commit_id: ObjectId) -> io::Result<(CommitMeta, u64)> {
         let inode = inode_from_oid(&commit_id);
         if let Some(existing) = self.nodes.read().get(&inode) {
             if let NodeKind::Commit { meta } = &existing.kind {
-                return Ok((meta.clone(), inode));
+                return Ok((*meta, inode));
             }
         }
 
@@ -181,16 +182,15 @@ impl GitSnapFs {
         let tree_id = commit.tree_id().map_err(io::Error::other)?.detach();
         let time = commit_time_to_system(&commit, self.start_time);
 
-        let meta = Arc::new(CommitMeta {
+        let meta = CommitMeta {
             id: commit_id,
             tree: tree_id,
             time,
-        });
+        };
 
         let node = Node {
             inode,
-            parent: Some(INODE_COMMITS),
-            kind: NodeKind::Commit { meta: meta.clone() },
+            kind: NodeKind::Commit { meta },
         };
         self.nodes.write().insert(inode, node);
         Ok((meta, inode))
@@ -209,7 +209,6 @@ impl GitSnapFs {
         name: &[u8],
         namespace: u8,
         refs: Vec<(String, ObjectId)>,
-        parent: u64,
     ) -> io::Result<Entry> {
         let name_str =
             str::from_utf8(name).map_err(|_| io::Error::from_raw_os_error(libc::ENOENT))?;
@@ -224,7 +223,6 @@ impl GitSnapFs {
         let inode = synthetic_inode(namespace, name);
         let node = Node {
             inode,
-            parent: Some(parent),
             kind: NodeKind::SyntheticSymlink {
                 target: target.clone(),
                 time: meta.time,
@@ -238,40 +236,13 @@ impl GitSnapFs {
 
     fn readdir_refs(
         &self,
-        dir_inode: u64,
         mut offset: u64,
         add_entry: &mut dyn FnMut(DirEntry) -> io::Result<usize>,
         refs: Vec<(String, ObjectId)>,
         namespace: u8,
     ) -> io::Result<()> {
-        if offset == 0 {
-            if add_entry(DirEntry {
-                ino: dir_inode,
-                offset: 1,
-                type_: u32::from(libc::DT_DIR),
-                name: NAME_DOT,
-            })? == 0
-            {
-                return Ok(());
-            }
-            offset = 1;
-        }
-
-        if offset == 1 {
-            if add_entry(DirEntry {
-                ino: ROOT_ID,
-                offset: 2,
-                type_: u32::from(libc::DT_DIR),
-                name: NAME_DOT_DOT,
-            })? == 0
-            {
-                return Ok(());
-            }
-            offset = 2;
-        }
-
         for (index, (name, commit_id)) in refs.into_iter().enumerate() {
-            let entry_offset = (index as u64) + 3;
+            let entry_offset = index as u64;
             if offset > entry_offset {
                 continue;
             }
@@ -286,7 +257,6 @@ impl GitSnapFs {
                     inode,
                     Node {
                         inode,
-                        parent: Some(dir_inode),
                         kind: NodeKind::SyntheticSymlink {
                             target,
                             time: meta.time,
@@ -365,7 +335,7 @@ impl GitSnapFs {
         commit_ids.sort();
 
         for (index, commit_id) in commit_ids.iter().enumerate() {
-            let entry_offset = (index as u64) + 3;
+            let entry_offset = index as u64;
             if offset > entry_offset {
                 continue;
             }
@@ -389,8 +359,8 @@ impl GitSnapFs {
 
     fn materialize_tree_child(&self, parent: &Node, name: &[u8]) -> io::Result<(Node, stat64)> {
         let (meta, tree_id) = match &parent.kind {
-            NodeKind::Commit { meta } => (meta.clone(), meta.tree),
-            NodeKind::Tree { meta, tree } => (meta.clone(), *tree),
+            NodeKind::Commit { meta } => (*meta, meta.tree),
+            NodeKind::Tree { meta, tree } => (*meta, *tree),
             NodeKind::Submodule { .. }
             | NodeKind::Blob { .. }
             | NodeKind::Symlink { .. }
@@ -428,9 +398,8 @@ impl GitSnapFs {
             EntryKind::Tree => {
                 let node = Node {
                     inode: child_inode,
-                    parent: Some(parent.inode),
                     kind: NodeKind::Tree {
-                        meta: meta.clone(),
+                        meta,
                         tree: child_oid,
                     },
                 };
@@ -448,9 +417,8 @@ impl GitSnapFs {
                 let size = blob.data.len() as u64;
                 let node = Node {
                     inode: child_inode,
-                    parent: Some(parent.inode),
                     kind: NodeKind::Blob {
-                        meta: meta.clone(),
+                        meta,
                         oid: child_oid,
                         executable,
                         size,
@@ -465,9 +433,8 @@ impl GitSnapFs {
                 let size = target.len() as u64;
                 let node = Node {
                     inode: child_inode,
-                    parent: Some(parent.inode),
                     kind: NodeKind::Symlink {
-                        meta: meta.clone(),
+                        meta,
                         target,
                     },
                 };
@@ -477,9 +444,8 @@ impl GitSnapFs {
             EntryKind::Commit => {
                 let node = Node {
                     inode: child_inode,
-                    parent: Some(parent.inode),
                     kind: NodeKind::Submodule {
-                        meta: meta.clone(),
+                        meta,
                         _oid: child_oid,
                     },
                 };
@@ -524,7 +490,7 @@ impl GitSnapFs {
         }
     }
 
-    fn head_metadata(&self) -> io::Result<(Arc<CommitMeta>, Vec<u8>)> {
+    fn head_metadata(&self) -> io::Result<(CommitMeta, Vec<u8>)> {
         let commit_id = self.repo.resolve_head().map_err(io::Error::other)?;
         let (meta, _) = self.ensure_commit_node(commit_id)?;
         let target = format!("../commits/{}", meta.id).into_bytes();
@@ -579,7 +545,7 @@ impl GitSnapFs {
 
         for (index, entry) in tree.iter().enumerate() {
             let entry = entry.map_err(io::Error::other)?;
-            let entry_offset = (index as u64) + 3;
+            let entry_offset = index as u64;
             if offset > entry_offset {
                 continue;
             }
@@ -602,8 +568,6 @@ impl GitSnapFs {
                 return Ok(());
             }
         }
-
-        drop(tree);
 
         Ok(())
     }
@@ -636,12 +600,12 @@ impl FileSystem for GitSnapFs {
 
         if parent == INODE_BRANCHES {
             let refs = self.repo.list_branches().map_err(io::Error::other)?;
-            return self.lookup_reference_symlink(name, NAMESPACE_BRANCH, refs, INODE_BRANCHES);
+            return self.lookup_reference_symlink(name, NAMESPACE_BRANCH, refs);
         }
 
         if parent == INODE_TAGS {
             let refs = self.repo.list_tags().map_err(io::Error::other)?;
-            return self.lookup_reference_symlink(name, NAMESPACE_TAG, refs, INODE_TAGS);
+            return self.lookup_reference_symlink(name, NAMESPACE_TAG, refs);
         }
 
         let parent_node = self.node_for_inode(parent)?;
@@ -775,12 +739,12 @@ impl FileSystem for GitSnapFs {
 
         if inode == INODE_BRANCHES {
             let refs = self.repo.list_branches().map_err(io::Error::other)?;
-            return self.readdir_refs(inode, offset, add_entry, refs, NAMESPACE_BRANCH);
+            return self.readdir_refs(offset, add_entry, refs, NAMESPACE_BRANCH);
         }
 
         if inode == INODE_TAGS {
             let refs = self.repo.list_tags().map_err(io::Error::other)?;
-            return self.readdir_refs(inode, offset, add_entry, refs, NAMESPACE_TAG);
+            return self.readdir_refs(offset, add_entry, refs, NAMESPACE_TAG);
         }
 
         let node = self.node_for_inode(inode)?;
@@ -901,31 +865,8 @@ impl FileSystem for GitSnapFs {
 fn readdir_root(
     mut offset: u64,
     add_entry: &mut dyn FnMut(DirEntry) -> io::Result<usize>,
+
 ) -> io::Result<()> {
-    if offset == 0 {
-        if add_entry(DirEntry {
-            ino: ROOT_ID,
-            offset: 1,
-            type_: u32::from(libc::DT_DIR),
-            name: NAME_DOT,
-        })? == 0
-        {
-            return Ok(());
-        }
-        offset = 1;
-    }
-    if offset == 1 {
-        if add_entry(DirEntry {
-            ino: ROOT_ID,
-            offset: 2,
-            type_: u32::from(libc::DT_DIR),
-            name: NAME_DOT_DOT,
-        })? == 0
-        {
-            return Ok(());
-        }
-        offset = 2;
-    }
 
     let synthetic_entries: &[(u64, u32, &[u8])] = &[
         (INODE_COMMITS, u32::from(libc::DT_DIR), NAME_COMMITS),
@@ -935,7 +876,7 @@ fn readdir_root(
     ];
 
     for (index, (ino, ty, name)) in synthetic_entries.iter().enumerate() {
-        let entry_offset = (index as u64) + 3;
+        let entry_offset = index as u64;
         if offset > entry_offset {
             continue;
         }
