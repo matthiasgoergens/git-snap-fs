@@ -154,4 +154,4 @@ Remove useless uses of `Arc`.
 
 Remove nodes: `RwLock<HashMap<u64, Node>>,` from `GitSnapFs`.  We can look up everything in gix on demand.
 
-Remove parent tracking from Node and in general: let fuse tell the kernel to handle that.
+Remove parent tracking from Node and in general: let fuse tell the kernel to handle that.  Use EXPORT_SUPPORT for that.  See https://github.com/cloud-hypervisor/fuse-backend-rs/blob/e5e12aee4942cf8680599ad18800a862b0a590fc/src/abi/fuse_abi_linux.rs#L119 We can check for the options we need to set there, that make our performance better or implementation simpler.
