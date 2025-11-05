@@ -576,10 +576,9 @@ impl GitSnapFs {
             let filename = entry.inner.filename.as_bytes();
             let (child, _) = self.materialize_tree_child(node, filename)?;
             let entry_type = match entry.inner.mode.kind() {
-                EntryKind::Tree => libc::DT_DIR,
                 EntryKind::Blob | EntryKind::BlobExecutable => libc::DT_REG,
                 EntryKind::Link => libc::DT_LNK,
-                EntryKind::Commit => libc::DT_DIR,
+                EntryKind::Tree | EntryKind::Commit => libc::DT_DIR,
             };
 
             if add_entry(DirEntry {
@@ -784,9 +783,9 @@ impl FileSystem for GitSnapFs {
         }
         let node = self.node_for_inode(inode)?;
         match node.kind {
-            NodeKind::Symlink { target, .. } => Ok(target),
-            NodeKind::Submodule { .. } => Err(io::Error::from_raw_os_error(libc::EINVAL)),
-            NodeKind::SyntheticSymlink { target, .. } => Ok(target),
+            NodeKind::Symlink { target, .. } | NodeKind::SyntheticSymlink { target, .. } => {
+                Ok(target)
+            }
             _ => Err(io::Error::from_raw_os_error(libc::EINVAL)),
         }
     }
@@ -838,13 +837,15 @@ impl FileSystem for GitSnapFs {
         let repo = self.repo.thread_local();
         let blob = repo.find_blob(blob_oid).map_err(io::Error::other)?;
         let data = blob.data.as_slice();
-        let offset = offset as usize;
-        if offset >= data.len() {
+        let start =
+            usize::try_from(offset).map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
+        if start >= data.len() {
             return Ok(0);
         }
-        let end = offset.saturating_add(size as usize).min(data.len());
-        w.write_all(&data[offset..end])?;
-        Ok(end - offset)
+        let span = usize::try_from(size).map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
+        let end = start.saturating_add(span).min(data.len());
+        w.write_all(&data[start..end])?;
+        Ok(end - start)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -971,7 +972,7 @@ fn build_file_attr(inode: u64, mode: u32, size: u64, time: SystemTime) -> stat64
     attr.st_gid = 0;
     attr.st_blksize = 4096;
     attr.st_blocks = 0;
-    attr.st_size = size as i64;
+    attr.st_size = saturating_i64_from_u64(size);
     attr.st_atime = secs;
     attr.st_atime_nsec = nsecs;
     attr.st_mtime = secs;
@@ -991,7 +992,7 @@ fn build_symlink_attr(inode: u64, mode: u32, time: SystemTime, size: u64) -> sta
     attr.st_gid = 0;
     attr.st_blksize = 4096;
     attr.st_blocks = 0;
-    attr.st_size = size as i64;
+    attr.st_size = saturating_i64_from_u64(size);
     attr.st_atime = secs;
     attr.st_atime_nsec = nsecs;
     attr.st_mtime = secs;
@@ -1003,12 +1004,22 @@ fn build_symlink_attr(inode: u64, mode: u32, time: SystemTime, size: u64) -> sta
 
 fn time_to_unix_parts(time: SystemTime) -> (i64, i64) {
     match time.duration_since(UNIX_EPOCH) {
-        Ok(duration) => (duration.as_secs() as i64, duration.subsec_nanos() as i64),
+        Ok(duration) => (
+            saturating_i64_from_u64(duration.as_secs()),
+            i64::from(duration.subsec_nanos()),
+        ),
         Err(err) => {
             let duration = err.duration();
-            (-(duration.as_secs() as i64), duration.subsec_nanos() as i64)
+            (
+                -saturating_i64_from_u64(duration.as_secs()),
+                i64::from(duration.subsec_nanos()),
+            )
         }
     }
+}
+
+fn saturating_i64_from_u64(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
 }
 
 fn commit_time_to_system(commit: &gix::Commit<'_>, default: SystemTime) -> SystemTime {
