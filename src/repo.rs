@@ -18,7 +18,8 @@ pub struct Repository {
 
 impl Repository {
     pub fn open(path: &Path) -> Result<Self> {
-        let repo = gix::open(path).with_context(|| format!("failed to open repository at {}", path.display()))?;
+        let repo = gix::open(path)
+            .with_context(|| format!("failed to open repository at {}", path.display()))?;
         Ok(Self { inner: repo })
     }
 
@@ -27,7 +28,10 @@ impl Repository {
     }
 
     pub fn resolve_full_commit_id(&self, hex: &str) -> Result<ObjectId> {
-        let id = self.inner.rev_parse_single(hex.as_bytes().as_bstr())?.detach();
+        let id = self
+            .inner
+            .rev_parse_single(hex.as_bytes().as_bstr())?
+            .detach();
         // Ensure the target is a commit; this surfaces a clearer error if the
         // id resolves to a blob/tree/tag.
         let commit = self.inner.find_commit(id)?;
