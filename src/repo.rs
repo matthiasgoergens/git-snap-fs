@@ -24,7 +24,7 @@ impl Repository {
     pub fn resolve_full_commit_id(&self, hex: &str) -> Result<ObjectId> {
         let repo = self.inner.to_thread_local();
         let id = repo.rev_parse_single(hex.as_bytes().as_bstr())?.detach();
-        let commit = repo.find_commit(id.clone())?;
+        let commit = repo.find_commit(id)?;
         Ok(commit.id)
     }
 
@@ -35,7 +35,7 @@ impl Repository {
             .try_peel_to_id()?
             .ok_or_else(|| anyhow!("repository HEAD is unborn and has no target commit"))?
             .detach();
-        let commit = repo.find_commit(id.clone())?;
+        let commit = repo.find_commit(id)?;
         Ok(commit.id)
     }
 

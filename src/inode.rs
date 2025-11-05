@@ -28,7 +28,7 @@ mod tests {
     use gix::hash::ObjectId as HashObjectId;
 
     fn oid(hex: &str) -> ObjectId {
-        HashObjectId::from_hex(hex.as_bytes()).unwrap().into()
+        HashObjectId::from_hex(hex.as_bytes()).unwrap()
     }
 
     #[test]

@@ -81,26 +81,21 @@ impl FuseRuntime {
 
     fn serve(self) -> Result<()> {
         let mut channel = self.session.new_channel()?;
-        loop {
-            match channel.get_request()? {
-                Some((reader, writer)) => {
-                    if let Err(e) = self
-                        .server
-                        .handle_message(reader, writer.into(), None, None)
+        while let Some((reader, writer)) = channel.get_request()? {
+            if let Err(e) = self
+                .server
+                .handle_message(reader, writer.into(), None, None)
+            {
+                match e {
+                    fuse_backend_rs::Error::EncodeMessage(ioe)
+                        if ioe.raw_os_error() == Some(libc::EBADF) =>
                     {
-                        match e {
-                            fuse_backend_rs::Error::EncodeMessage(ioe)
-                                if ioe.raw_os_error() == Some(libc::EBADF) =>
-                            {
-                                break;
-                            }
-                            other => {
-                                error!(?other, "handling FUSE message failed");
-                            }
-                        }
+                        break;
+                    }
+                    other => {
+                        error!(?other, "handling FUSE message failed");
                     }
                 }
-                None => break,
             }
         }
         Ok(())

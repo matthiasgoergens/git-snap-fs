@@ -176,13 +176,8 @@ impl GitSnapFs {
         }
 
         let repo = self.repo.thread_local();
-        let commit = repo
-            .find_commit(commit_id)
-            .map_err(io::Error::other)?;
-        let tree_id = commit
-            .tree_id()
-            .map_err(io::Error::other)?
-            .detach();
+        let commit = repo.find_commit(commit_id).map_err(io::Error::other)?;
+        let tree_id = commit.tree_id().map_err(io::Error::other)?.detach();
         let time = commit_time_to_system(&commit, self.start_time);
 
         let meta = Arc::new(CommitMeta {
@@ -394,14 +389,12 @@ impl GitSnapFs {
         };
 
         let repo = self.repo.thread_local();
-        let tree = repo
-            .find_tree(tree_id)
-            .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+        let tree = repo.find_tree(tree_id).map_err(io::Error::other)?;
 
         let mut found_mode: Option<EntryMode> = None;
         let mut found_oid = None;
         for entry in tree.iter() {
-            let entry = entry.map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+            let entry = entry.map_err(io::Error::other)?;
             if entry.inner.filename.as_bytes() == name {
                 found_mode = Some(entry.inner.mode);
                 found_oid = Some(entry.inner.oid.to_owned());
@@ -433,16 +426,14 @@ impl GitSnapFs {
                     parent: Some(parent.inode),
                     kind: NodeKind::Tree {
                         meta: meta.clone(),
-                        tree: child_oid.clone(),
+                        tree: child_oid,
                     },
                 };
                 let attr = build_dir_attr(child_inode, DIRECTORY_ATTR_MODE, meta.time);
                 (node, attr)
             }
             EntryKind::Blob | EntryKind::BlobExecutable => {
-                let blob = repo
-                    .find_blob(child_oid.clone())
-                    .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+                let blob = repo.find_blob(child_oid).map_err(io::Error::other)?;
                 let executable = matches!(kind, EntryKind::BlobExecutable);
                 let file_mode = if executable {
                     S_IFREG | 0o555
@@ -455,7 +446,7 @@ impl GitSnapFs {
                     parent: Some(parent.inode),
                     kind: NodeKind::Blob {
                         meta: meta.clone(),
-                        oid: child_oid.clone(),
+                        oid: child_oid,
                         executable,
                         size,
                     },
@@ -464,9 +455,7 @@ impl GitSnapFs {
                 (node, attr)
             }
             EntryKind::Link => {
-                let blob = repo
-                    .find_blob(child_oid.clone())
-                    .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+                let blob = repo.find_blob(child_oid).map_err(io::Error::other)?;
                 let target = blob.data.clone();
                 let size = target.len() as u64;
                 let node = Node {
@@ -486,7 +475,7 @@ impl GitSnapFs {
                     parent: Some(parent.inode),
                     kind: NodeKind::Submodule {
                         meta: meta.clone(),
-                        _oid: child_oid.clone(),
+                        _oid: child_oid,
                     },
                 };
                 let attr = build_dir_attr(child_inode, DIRECTORY_ATTR_MODE, meta.time);
@@ -534,10 +523,7 @@ impl GitSnapFs {
     }
 
     fn head_metadata(&self) -> io::Result<(Arc<CommitMeta>, Vec<u8>)> {
-        let commit_id = self
-            .repo
-            .resolve_head()
-            .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+        let commit_id = self.repo.resolve_head().map_err(io::Error::other)?;
         let (meta, _) = self.ensure_commit_node(commit_id)?;
         let target = format!("../commits/{}", meta.id).into_bytes();
         Ok((meta, target))
@@ -578,8 +564,8 @@ impl GitSnapFs {
         }
 
         let tree_id = match &node.kind {
-            NodeKind::Commit { meta } => meta.tree.clone(),
-            NodeKind::Tree { tree, .. } => tree.clone(),
+            NodeKind::Commit { meta } => meta.tree,
+            NodeKind::Tree { tree, .. } => *tree,
             NodeKind::Submodule { .. } => return Ok(()),
             NodeKind::Blob { .. } | NodeKind::Symlink { .. } => {
                 return Err(io::Error::from_raw_os_error(libc::ENOTDIR))
@@ -588,12 +574,10 @@ impl GitSnapFs {
         };
 
         let repo = self.repo.thread_local();
-        let tree = repo
-            .find_tree(tree_id)
-            .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+        let tree = repo.find_tree(tree_id).map_err(io::Error::other)?;
 
         for (index, entry) in tree.iter().enumerate() {
-            let entry = entry.map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+            let entry = entry.map_err(io::Error::other)?;
             let entry_offset = (index as u64) + 3;
             if offset > entry_offset {
                 continue;
@@ -651,18 +635,12 @@ impl FileSystem for GitSnapFs {
         }
 
         if parent == INODE_BRANCHES {
-            let refs = self
-                .repo
-                .list_branches()
-                .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+            let refs = self.repo.list_branches().map_err(io::Error::other)?;
             return self.lookup_reference_symlink(name, NAMESPACE_BRANCH, refs, INODE_BRANCHES);
         }
 
         if parent == INODE_TAGS {
-            let refs = self
-                .repo
-                .list_tags()
-                .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+            let refs = self.repo.list_tags().map_err(io::Error::other)?;
             return self.lookup_reference_symlink(name, NAMESPACE_TAG, refs, INODE_TAGS);
         }
 
@@ -796,18 +774,12 @@ impl FileSystem for GitSnapFs {
         }
 
         if inode == INODE_BRANCHES {
-            let refs = self
-                .repo
-                .list_branches()
-                .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+            let refs = self.repo.list_branches().map_err(io::Error::other)?;
             return self.readdir_refs(inode, offset, add_entry, refs, NAMESPACE_BRANCH);
         }
 
         if inode == INODE_TAGS {
-            let refs = self
-                .repo
-                .list_tags()
-                .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+            let refs = self.repo.list_tags().map_err(io::Error::other)?;
             return self.readdir_refs(inode, offset, add_entry, refs, NAMESPACE_TAG);
         }
 
@@ -867,14 +839,12 @@ impl FileSystem for GitSnapFs {
     ) -> io::Result<usize> {
         let node = self.node_for_inode(inode)?;
         let blob_oid = match node.kind {
-            NodeKind::Blob { ref oid, .. } => oid.clone(),
+            NodeKind::Blob { ref oid, .. } => *oid,
             _ => return Err(io::Error::from_raw_os_error(libc::EINVAL)),
         };
 
         let repo = self.repo.thread_local();
-        let blob = repo
-            .find_blob(blob_oid)
-            .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+        let blob = repo.find_blob(blob_oid).map_err(io::Error::other)?;
         let data = blob.data.as_slice();
         let offset = offset as usize;
         if offset >= data.len() {

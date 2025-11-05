@@ -16,7 +16,7 @@ pub fn clear_cloexec(fd: RawFd) -> Result<()> {
     let mut new_flags = flags;
     new_flags.remove(FdFlag::FD_CLOEXEC);
     fcntl(fd, FcntlArg::F_SETFD(new_flags))
-        .with_context(|| format!("failed to clear FD_CLOEXEC on fd {}", fd))?;
+        .with_context(|| format!("failed to clear FD_CLOEXEC on fd {fd}"))?;
     Ok(())
 }
 
