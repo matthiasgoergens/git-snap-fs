@@ -72,7 +72,8 @@ struct FuseRuntime {
 impl FuseRuntime {
     fn new(fs: GitSnapFs, mountpoint: &Path, allow_other: bool) -> Result<Self> {
         let server = Arc::new(Server::new(Arc::new(fs)));
-        let mut session = FuseSession::new(mountpoint, "gitsnapfs", "gitsnapfs", true)?;
+        let mut session =
+            FuseSession::new_with_autounmount(mountpoint, "gitsnapfs", "gitsnapfs", true, true)?;
         session.set_allow_other(allow_other);
         session.mount()?;
         Ok(Self { server, session })

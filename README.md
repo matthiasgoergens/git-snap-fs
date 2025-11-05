@@ -18,6 +18,8 @@ cargo run -- --repo <path-to-git-dir> --mountpoint <existing-empty-dir>
 
 This mounts the Git repository as a read-only filesystem and already exposes the root directories (`commits`, `branches`, `tags`, `HEAD`). Unmount with `fusermount -u <mountpoint>` when done. The server currently relies on `fuse-backend-rs` for FUSE plumbing and `gitoxide` (`gix`) for repository access.
 
+The daemon requests `fusermount` auto-unmount support, so the mount is torn down automatically even if the process is interrupted or crashes.
+
 ### Development Notes
 
 - Coding prompt and design details for contributors are documented in `codex_spec.md`.
