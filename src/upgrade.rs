@@ -1,5 +1,5 @@
 use std::ffi::CString;
-use std::os::fd::{FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{BorrowedFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
@@ -13,13 +13,14 @@ use nix::unistd::{dup, execv};
 ///
 /// Returns an error if `fcntl` fails while reading or updating the descriptor flags.
 pub fn clear_cloexec(fd: RawFd) -> Result<()> {
-    let flags = FdFlag::from_bits_truncate(fcntl(fd, FcntlArg::F_GETFD)?);
+    let fd_ref = unsafe { BorrowedFd::borrow_raw(fd) };
+    let flags = FdFlag::from_bits_truncate(fcntl(fd_ref, FcntlArg::F_GETFD)?);
     if !flags.contains(FdFlag::FD_CLOEXEC) {
         return Ok(());
     }
     let mut new_flags = flags;
     new_flags.remove(FdFlag::FD_CLOEXEC);
-    fcntl(fd, FcntlArg::F_SETFD(new_flags))
+    fcntl(fd_ref, FcntlArg::F_SETFD(new_flags))
         .with_context(|| format!("failed to clear FD_CLOEXEC on fd {fd}"))?;
     Ok(())
 }
@@ -45,8 +46,9 @@ pub fn exec_with_env(path: &Path) -> Result<()> {
 ///
 /// Returns an error if duplicating the file descriptor fails.
 pub fn dup_fd(fd: RawFd) -> Result<OwnedFd> {
-    let duped = dup(fd)?;
-    Ok(unsafe { OwnedFd::from_raw_fd(duped) })
+    let fd_ref = unsafe { BorrowedFd::borrow_raw(fd) };
+    let duped = dup(fd_ref)?;
+    Ok(duped)
 }
 
 fn _assert_send_sync()
