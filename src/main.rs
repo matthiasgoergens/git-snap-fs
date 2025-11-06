@@ -82,9 +82,9 @@ impl FuseRuntime {
     fn serve(self) -> Result<()> {
         let mut channel = self.session.new_channel()?;
         while let Some((reader, writer)) = channel.get_request()? {
-            if let Err(err) =
-                self.server
-                    .handle_message(reader, writer.into(), None, None)
+            if let Err(err) = self
+                .server
+                .handle_message(reader, writer.into(), None, None)
             {
                 match err {
                     fuse_backend_rs::Error::EncodeMessage(ioe) => {

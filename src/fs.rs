@@ -6,7 +6,7 @@ use std::io;
 use std::str;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use fuse_backend_rs::abi::fuse_abi::{stat64, CreateIn, ROOT_ID};
+use fuse_backend_rs::abi::fuse_abi::{stat64, Attr, CreateIn, ROOT_ID};
 use fuse_backend_rs::api::filesystem::{
     Context, DirEntry, Entry, FileSystem, OpenOptions, SetattrValid, ZeroCopyReader, ZeroCopyWriter,
 };
@@ -777,64 +777,40 @@ fn synthetic_inode(namespace: u8, name: &[u8]) -> u64 {
     (u64::from(namespace) << 56) | (hash & 0x00FF_FFFF_FFFF_FFFF)
 }
 
-fn build_dir_attr(inode: u64, mode: u32, time: SystemTime) -> stat64 {
+fn build_attr(inode: u64, mode: u32, nlink: u32, size: i64, time: SystemTime) -> stat64 {
     let (secs, nsecs) = time_to_unix_parts(time);
-    let mut attr: stat64 = unsafe { std::mem::zeroed() };
-    attr.st_ino = inode;
-    attr.st_mode = mode;
-    attr.st_nlink = 2;
-    attr.st_uid = 0;
-    attr.st_gid = 0;
-    attr.st_blksize = 4096;
-    attr.st_blocks = 0;
-    attr.st_size = 0;
-    attr.st_atime = secs;
-    attr.st_atime_nsec = nsecs;
-    attr.st_mtime = secs;
-    attr.st_mtime_nsec = nsecs;
-    attr.st_ctime = secs;
-    attr.st_ctime_nsec = nsecs;
-    attr
+    debug_assert!(size >= 0, "size is expected to be non-negative");
+    let attr = Attr {
+        ino: inode,
+        size: size as u64,
+        blocks: 0,
+        atime: secs as u64,
+        mtime: secs as u64,
+        ctime: secs as u64,
+        atimensec: nsecs as u32,
+        mtimensec: nsecs as u32,
+        ctimensec: nsecs as u32,
+        mode,
+        nlink,
+        uid: 0,
+        gid: 0,
+        rdev: 0,
+        blksize: 4096,
+        flags: 0,
+    };
+    attr.into()
+}
+
+fn build_dir_attr(inode: u64, mode: u32, time: SystemTime) -> stat64 {
+    build_attr(inode, mode, 2, 0, time)
 }
 
 fn build_file_attr(inode: u64, mode: u32, size: u64, time: SystemTime) -> stat64 {
-    let (secs, nsecs) = time_to_unix_parts(time);
-    let mut attr: stat64 = unsafe { std::mem::zeroed() };
-    attr.st_ino = inode;
-    attr.st_mode = mode;
-    attr.st_nlink = 1;
-    attr.st_uid = 0;
-    attr.st_gid = 0;
-    attr.st_blksize = 4096;
-    attr.st_blocks = 0;
-    attr.st_size = saturating_i64_from_u64(size);
-    attr.st_atime = secs;
-    attr.st_atime_nsec = nsecs;
-    attr.st_mtime = secs;
-    attr.st_mtime_nsec = nsecs;
-    attr.st_ctime = secs;
-    attr.st_ctime_nsec = nsecs;
-    attr
+    build_attr(inode, mode, 1, saturating_i64_from_u64(size), time)
 }
 
 fn build_symlink_attr(inode: u64, mode: u32, time: SystemTime, size: u64) -> stat64 {
-    let (secs, nsecs) = time_to_unix_parts(time);
-    let mut attr: stat64 = unsafe { std::mem::zeroed() };
-    attr.st_ino = inode;
-    attr.st_mode = mode;
-    attr.st_nlink = 1;
-    attr.st_uid = 0;
-    attr.st_gid = 0;
-    attr.st_blksize = 4096;
-    attr.st_blocks = 0;
-    attr.st_size = saturating_i64_from_u64(size);
-    attr.st_atime = secs;
-    attr.st_atime_nsec = nsecs;
-    attr.st_mtime = secs;
-    attr.st_mtime_nsec = nsecs;
-    attr.st_ctime = secs;
-    attr.st_ctime_nsec = nsecs;
-    attr
+    build_attr(inode, mode, 1, saturating_i64_from_u64(size), time)
 }
 
 fn time_to_unix_parts(time: SystemTime) -> (i64, i64) {
