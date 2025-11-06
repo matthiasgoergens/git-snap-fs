@@ -2,26 +2,43 @@
 
 GitSnapFS exposes snapshots of a Git repository as a read-only filesystem designed for safe inspection, automated audits, and tooling integration.
 
+### Highlights
+
 - `/commits/<full-hex-commit-id>` presents the tree for an individual commit.
-- `branches/`, `tags/`, and `HEAD` appear as symlinks into the appropriate commit snapshot.
-- Every Git object maps consistently to a synthetic inode so multiple hardlinks work as expected.
-- The daemon is read-only and resolves data lazily, so it tracks repository updates without a heavy startup scan.
-- Hot upgrades keep the mount active by passing the FUSE file descriptor across an `exec`.
+- `branches/`, `tags/`, and `HEAD` materialise as symlinks into the matching commit snapshot.
+- Synthetic inodes are derived from Git object IDs so links remain stable across views.
+- The filesystem is strictly read-only and answers requests lazily; updates in the underlying repo are surfaced without a pre-scan.
+- Hot upgrades keep the mount active by duping the FUSE file descriptor across an `exec`.
+- Directory listings leave `.` and `..` to the kernel, letting path caches stay in userspace.
+- We leverage the kernel’s zero-message open/opendir paths (`NO_OPEN_SUPPORT`, `NO_OPENDIR_SUPPORT`) for near-native performance once data is cached.
 
-### Building & Running
+### Requirements
 
-Implementation is in progress. A minimal FUSE server is available and can be exercised with:
+- Linux with FUSE kernel support that advertises `EXPORT_SUPPORT`, `ZERO_MESSAGE_OPEN`, and `ZERO_MESSAGE_OPENDIR`.
+- `fusermount`/`fusermount3` (typically provided by `fuse` packages).
+- Rust toolchain nightly or stable recent enough to build the dependency graph (`cargo`, `rustc`).
 
+### Quick Start
+
+```bash
+cargo run -- --repo path/to/.git --mountpoint /tmp/gitfs
 ```
-cargo run -- --repo <path-to-git-dir> --mountpoint <existing-empty-dir>
+
+The mount exposes the root layout (`commits`, `branches`, `tags`, `HEAD`). Unmount with:
+
+```bash
+fusermount -u /tmp/gitfs   # or fusermount3 -u
 ```
 
-This mounts the Git repository as a read-only filesystem and already exposes the root directories (`commits`, `branches`, `tags`, `HEAD`). Unmount with `fusermount -u <mountpoint>` when done. The server currently relies on `fuse-backend-rs` for FUSE plumbing and `gitoxide` (`gix`) for repository access.
+### Development
 
-The daemon requests `fusermount` auto-unmount support, so the mount is torn down automatically even if the process is interrupted or crashes.
+- Design notes live in `codex_spec.md`.
+- Formatting and linting are enforced with the following commands:
 
-### Development Notes
+  ```bash
+  cargo fmt
+  cargo clippy --all-targets --all-features -- -D clippy::pedantic -D clippy::style -D clippy::cargo
+  ```
 
-- Coding prompt and design details for contributors are documented in `codex_spec.md`.
-- Tests will cover inode mapping, collision handling, and an integration scenario mounting a small test repository.
-- Contributions should keep the filesystem strictly read-only and avoid libfuse/libgit2 C shims.
+- The `clippy.toml` documents unavoidable duplicate crate versions coming from upstream dependencies.
+- Please keep the filesystem read-only and avoid libfuse/libgit2 shims; all Git access goes through `gix` and FUSE plumbing through `fuse-backend-rs`.
