@@ -260,11 +260,6 @@ impl GitSnapFs {
         ])
     }
 
-    fn list_commits_dir(&self) -> io::Result<Vec<DirRecord>> {
-        // Enumerating every commit does not scale; signal that the operation is unsupported.
-        Err(io::Error::from_raw_os_error(libc::ENOTSUP))
-    }
-
     fn list_refs_dir(&self, ns: RefNamespace) -> io::Result<Vec<DirRecord>> {
         let refs = ns.list(&self.repo)?;
         let records = refs
@@ -317,7 +312,10 @@ impl GitSnapFs {
     fn list_directory(&self, inode: u64) -> io::Result<Vec<DirRecord>> {
         match inode {
             ROOT_ID => self.list_root(),
-            INODE_COMMITS => self.list_commits_dir(),
+            INODE_COMMITS => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "enumerating the commits directory is not supported",
+            )),
             INODE_BRANCHES => self.list_refs_dir(RefNamespace::Branches),
             INODE_TAGS => self.list_refs_dir(RefNamespace::Tags),
             _ => self.list_tree_dir(inode),
@@ -573,7 +571,9 @@ impl FileSystem for GitSnapFs {
         add_entry: &mut dyn FnMut(DirEntry) -> io::Result<usize>,
     ) -> io::Result<()> {
         let records = self.list_directory(inode)?;
-        for (index, record) in records.into_iter().enumerate().skip(offset as usize) {
+        let start =
+            usize::try_from(offset).map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
+        for (index, record) in records.into_iter().enumerate().skip(start) {
             let entry_offset = index as u64;
             let dirent = DirEntry {
                 ino: record.ino,
