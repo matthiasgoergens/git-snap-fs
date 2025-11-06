@@ -68,15 +68,15 @@ impl RefNamespace {
 
 pub struct GitSnapFs {
     repo: Repository,
-    // TODO: instead of running time_to_unix_parts etc every time we need to build an attr, we can just do it once at the beginning, and store the result here, instead of storing as a SystemTime.
-    mount_time: SystemTime,
+    // Pre-calculated time parts to avoid repeated time_to_unix_parts calls
+    mount_time: (i64, i64), // (seconds, nanoseconds)
 }
 
 impl GitSnapFs {
     pub fn new(repo: Repository) -> Self {
         Self {
             repo,
-            mount_time: SystemTime::now(),
+            mount_time: time_to_unix_parts(SystemTime::now()),
         }
     }
 
@@ -827,8 +827,8 @@ fn synthetic_inode(namespace: u8, name: &[u8]) -> u64 {
     (u64::from(namespace) << 56) | (hash & 0x00FF_FFFF_FFFF_FFFF)
 }
 
-fn build_attr(inode: u64, mode: u32, nlink: u32, size: i64, time: SystemTime) -> stat64 {
-    let (secs, nsecs) = time_to_unix_parts(time);
+fn build_attr(inode: u64, mode: u32, nlink: u32, size: i64, time_parts: (i64, i64)) -> stat64 {
+    let (secs, nsecs) = time_parts;
     let attr = Attr {
         ino: inode,
         size: u64::try_from(size).unwrap_or(u64::MAX),
@@ -850,12 +850,12 @@ fn build_attr(inode: u64, mode: u32, nlink: u32, size: i64, time: SystemTime) ->
     attr.into()
 }
 
-fn build_dir_attr(inode: u64, mode: u32, time: SystemTime) -> stat64 {
-    build_attr(inode, mode, 2, 0, time)
+fn build_dir_attr(inode: u64, mode: u32, time_parts: (i64, i64)) -> stat64 {
+    build_attr(inode, mode, 2, 0, time_parts)
 }
 
-fn build_file_and_symlink_attr(inode: u64, mode: u32, size: u64, time: SystemTime) -> stat64 {
-    build_attr(inode, mode, 1, saturating_i64_from_u64(size), time)
+fn build_file_and_symlink_attr(inode: u64, mode: u32, size: u64, time_parts: (i64, i64)) -> stat64 {
+    build_attr(inode, mode, 1, saturating_i64_from_u64(size), time_parts)
 }
 
 fn time_to_unix_parts(time: SystemTime) -> (i64, i64) {
