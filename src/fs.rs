@@ -123,22 +123,13 @@ impl GitSnapFs {
         let name_str =
             str::from_utf8(name).map_err(|_| io::Error::from_raw_os_error(libc::ENOENT))?;
         let refs = ns.list(&self.repo)?;
-        let commit_id = refs
+        let object_id = refs
             .into_iter()
             .find(|(ref_name, _)| ref_name == name_str)
             .map(|(_, id)| id)
             .ok_or_else(|| io::Error::from_raw_os_error(libc::ENOENT))?;
-        let target = format!("../commits/{commit_id}");
-        let inode = synthetic_inode(ns.marker(), name);
-        Ok(Self::make_entry(
-            inode,
-            build_symlink_attr(
-                inode,
-                SYMLINK_ATTR_MODE,
-                self.mount_time,
-                target.len() as u64,
-            ),
-        ))
+        let (_, _, entry) = self.reference_entry_details(ns, name, object_id)?;
+        Ok(entry)
     }
 
     fn head_entry(&self) -> io::Result<Entry> {
@@ -262,28 +253,18 @@ impl GitSnapFs {
 
     fn list_refs_dir(&self, ns: RefNamespace) -> io::Result<Vec<DirRecord>> {
         let refs = ns.list(&self.repo)?;
-        let records = refs
-            .into_iter()
-            .map(|(name, commit_id)| {
-                let target = format!("../commits/{commit_id}");
-                let inode = synthetic_inode(ns.marker(), name.as_bytes());
-                DirRecord {
+        refs.into_iter()
+            .map(|(name, object_id)| {
+                let (inode, dtype, entry) =
+                    self.reference_entry_details(ns, name.as_bytes(), object_id)?;
+                Ok(DirRecord {
                     name: name.into_bytes(),
                     ino: inode,
-                    dtype: u32::from(libc::DT_LNK),
-                    entry: Some(Self::make_entry(
-                        inode,
-                        build_symlink_attr(
-                            inode,
-                            SYMLINK_ATTR_MODE,
-                            self.mount_time,
-                            target.len() as u64,
-                        ),
-                    )),
-                }
+                    dtype,
+                    entry: Some(entry),
+                })
             })
-            .collect();
-        Ok(records)
+            .collect()
     }
 
     fn list_tree_dir(&self, inode: u64) -> io::Result<Vec<DirRecord>> {
@@ -338,6 +319,57 @@ impl GitSnapFs {
             }
         }
         Err(io::Error::from_raw_os_error(libc::ENOENT))
+    }
+
+    fn reference_entry_details(
+        &self,
+        ns: RefNamespace,
+        name: &[u8],
+        object_id: ObjectId,
+    ) -> io::Result<(u64, u32, Entry)> {
+        let repo = self.repo.thread_local();
+        let object = repo.find_object(object_id).map_err(io::Error::other)?;
+        match object.kind {
+            Kind::Commit => {
+                let inode = synthetic_inode(ns.marker(), name);
+                let target = format!("../commits/{object_id}");
+                let entry = Self::make_entry(
+                    inode,
+                    build_symlink_attr(
+                        inode,
+                        SYMLINK_ATTR_MODE,
+                        self.mount_time,
+                        target.len() as u64,
+                    ),
+                );
+                Ok((inode, u32::from(libc::DT_LNK), entry))
+            }
+            Kind::Tree => {
+                let inode = inode_from_oid(&object_id);
+                let entry = Self::make_entry(
+                    inode,
+                    build_dir_attr(inode, DIRECTORY_ATTR_MODE, self.mount_time),
+                );
+                Ok((inode, u32::from(libc::DT_DIR), entry))
+            }
+            Kind::Blob => {
+                let inode = inode_from_oid(&object_id);
+                let blob = repo.find_blob(object_id).map_err(io::Error::other)?;
+                let entry = Self::make_entry(
+                    inode,
+                    build_file_attr(
+                        inode,
+                        S_IFREG | 0o444,
+                        blob.data.len() as u64,
+                        self.mount_time,
+                    ),
+                );
+                Ok((inode, u32::from(libc::DT_REG), entry))
+            }
+            Kind::Tag => Err(io::Error::other(
+                "tag reference resolves to another tag, which is unsupported",
+            )),
+        }
     }
 
     fn reference_target(&self, inode: u64, ns: RefNamespace) -> io::Result<Vec<u8>> {
