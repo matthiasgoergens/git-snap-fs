@@ -61,12 +61,11 @@ impl RefNamespace {
     }
 
     fn list(self, repo: &Repository) -> io::Result<Vec<(String, ObjectId)>> {
-        let refs = match self {
+        match self {
             RefNamespace::Branches => repo.list_branches(),
             RefNamespace::Tags => repo.list_tags(),
         }
-        .map_err(io::Error::other)?;
-        Ok(refs)
+        .map_err(io::Error::other)
     }
 
     fn parent_inode(self) -> u64 {
