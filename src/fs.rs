@@ -827,7 +827,7 @@ fn synthetic_inode(namespace: u8, name: &[u8]) -> u64 {
     (u64::from(namespace) << 56) | (hash & 0x00FF_FFFF_FFFF_FFFF)
 }
 
-fn build_attr(inode: u64, mode: u32, nlink: u32, size: i64, time_parts: (i64, i64)) -> stat64 {
+fn build_attr(inode: u64, mode: u32, size: i64, time_parts: (i64, i64)) -> stat64 {
     let (secs, nsecs) = time_parts;
     let attr = Attr {
         ino: inode,
@@ -840,7 +840,7 @@ fn build_attr(inode: u64, mode: u32, nlink: u32, size: i64, time_parts: (i64, i6
         mtimensec: u32::try_from(nsecs).unwrap_or_default(),
         ctimensec: u32::try_from(nsecs).unwrap_or_default(),
         mode,
-        nlink,
+        nlink: 2,
         uid: 0,
         gid: 0,
         rdev: 0,
@@ -851,11 +851,11 @@ fn build_attr(inode: u64, mode: u32, nlink: u32, size: i64, time_parts: (i64, i6
 }
 
 fn build_dir_attr(inode: u64, mode: u32, time_parts: (i64, i64)) -> stat64 {
-    build_attr(inode, mode, 2, 0, time_parts)
+    build_attr(inode, mode, 0, time_parts)
 }
 
 fn build_file_and_symlink_attr(inode: u64, mode: u32, size: u64, time_parts: (i64, i64)) -> stat64 {
-    build_attr(inode, mode, 1, saturating_i64_from_u64(size), time_parts)
+    build_attr(inode, mode, saturating_i64_from_u64(size), time_parts)
 }
 
 fn time_to_unix_parts(time: SystemTime) -> (i64, i64) {
