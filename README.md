@@ -30,6 +30,8 @@ The mount exposes the root layout (`commits`, `branches`, `tags`, `HEAD`). Unmou
 fusermount -u /tmp/gitfs   # or fusermount3 -u
 ```
 
+Or by just terminating the process.
+
 ### Development
 
 - Design notes live in `codex_spec.md`.
