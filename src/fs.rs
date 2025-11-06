@@ -436,8 +436,7 @@ impl FileSystem for GitSnapFs {
         let wanted = required | optional;
         let supported = capable & wanted;
         if !supported.contains(required) {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
+            return Err(io::Error::other(
                 "kernel does not advertise EXPORT_SUPPORT",
             ));
         }
