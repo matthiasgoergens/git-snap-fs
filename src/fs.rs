@@ -46,20 +46,21 @@ enum TreeContext {
     Tree { tree_id: ObjectId },
 }
 
+#[derive(Copy, Clone)]
 enum RefNamespace {
     Branches,
     Tags,
 }
 
 impl RefNamespace {
-    fn marker(&self) -> u8 {
+    fn marker(self) -> u8 {
         match self {
             RefNamespace::Branches => NAMESPACE_BRANCH,
             RefNamespace::Tags => NAMESPACE_TAG,
         }
     }
 
-    fn list(&self, repo: &Repository) -> io::Result<Vec<(String, ObjectId)>> {
+    fn list(self, repo: &Repository) -> io::Result<Vec<(String, ObjectId)>> {
         let refs = match self {
             RefNamespace::Branches => repo.list_branches(),
             RefNamespace::Tags => repo.list_tags(),
@@ -68,7 +69,7 @@ impl RefNamespace {
         Ok(refs)
     }
 
-    fn parent_inode(&self) -> u64 {
+    fn parent_inode(self) -> u64 {
         match self {
             RefNamespace::Branches => INODE_BRANCHES,
             RefNamespace::Tags => INODE_TAGS,
@@ -93,7 +94,7 @@ impl GitSnapFs {
         build_dir_attr(ROOT_ID, ROOT_ATTR_MODE, self.mount_time)
     }
 
-    fn make_entry(&self, inode: u64, attr: stat64) -> Entry {
+    fn make_entry(inode: u64, attr: stat64) -> Entry {
         Entry {
             inode,
             generation: 0,
@@ -105,7 +106,10 @@ impl GitSnapFs {
     }
 
     fn synthetic_dir_entry(&self, inode: u64) -> Entry {
-        self.make_entry(inode, build_dir_attr(inode, DIRECTORY_ATTR_MODE, self.mount_time))
+        Self::make_entry(
+            inode,
+            build_dir_attr(inode, DIRECTORY_ATTR_MODE, self.mount_time),
+        )
     }
 
     fn lookup_commit(&self, name: &[u8]) -> io::Result<Entry> {
@@ -116,7 +120,7 @@ impl GitSnapFs {
             .resolve_full_commit_id(name_str)
             .map_err(io::Error::other)?;
         let inode = inode_from_oid(&commit_id);
-        Ok(self.make_entry(
+        Ok(Self::make_entry(
             inode,
             build_dir_attr(inode, DIRECTORY_ATTR_MODE, self.mount_time),
         ))
@@ -131,9 +135,9 @@ impl GitSnapFs {
             .find(|(ref_name, _)| ref_name == name_str)
             .map(|(_, id)| id)
             .ok_or_else(|| io::Error::from_raw_os_error(libc::ENOENT))?;
-        let target = format!("../commits/{}", commit_id);
+        let target = format!("../commits/{commit_id}");
         let inode = synthetic_inode(ns.marker(), name);
-        Ok(self.make_entry(
+        Ok(Self::make_entry(
             inode,
             build_symlink_attr(
                 inode,
@@ -146,7 +150,7 @@ impl GitSnapFs {
 
     fn head_entry(&self) -> io::Result<Entry> {
         let target = self.head_target()?;
-        Ok(self.make_entry(
+        Ok(Self::make_entry(
             INODE_HEAD,
             build_symlink_attr(
                 INODE_HEAD,
@@ -159,7 +163,7 @@ impl GitSnapFs {
 
     fn head_target(&self) -> io::Result<Vec<u8>> {
         let commit_id = self.repo.resolve_head().map_err(io::Error::other)?;
-        Ok(format!("../commits/{}", commit_id).into_bytes())
+        Ok(format!("../commits/{commit_id}").into_bytes())
     }
 
     fn tree_context(&self, inode: u64) -> io::Result<TreeContext> {
@@ -177,21 +181,18 @@ impl GitSnapFs {
         }
     }
 
-    fn entry_for_tree_child(
-        &self,
-        mode: EntryMode,
-        oid: ObjectId,
-    ) -> io::Result<(Entry, u32)> {
+    fn entry_for_tree_child(&self, mode: EntryMode, oid: ObjectId) -> io::Result<(Entry, u32)> {
         let inode = inode_from_oid(&oid);
         let kind = mode.kind();
         let entry = match kind {
-            EntryKind::Tree | EntryKind::Commit => {
-                self.make_entry(inode, build_dir_attr(inode, DIRECTORY_ATTR_MODE, self.mount_time))
-            }
+            EntryKind::Tree | EntryKind::Commit => Self::make_entry(
+                inode,
+                build_dir_attr(inode, DIRECTORY_ATTR_MODE, self.mount_time),
+            ),
             EntryKind::Blob => {
                 let repo = self.repo.thread_local();
                 let blob = repo.find_blob(oid).map_err(io::Error::other)?;
-                self.make_entry(
+                Self::make_entry(
                     inode,
                     build_file_attr(
                         inode,
@@ -204,7 +205,7 @@ impl GitSnapFs {
             EntryKind::BlobExecutable => {
                 let repo = self.repo.thread_local();
                 let blob = repo.find_blob(oid).map_err(io::Error::other)?;
-                self.make_entry(
+                Self::make_entry(
                     inode,
                     build_file_attr(
                         inode,
@@ -217,7 +218,7 @@ impl GitSnapFs {
             EntryKind::Link => {
                 let repo = self.repo.thread_local();
                 let blob = repo.find_blob(oid).map_err(io::Error::other)?;
-                self.make_entry(
+                Self::make_entry(
                     inode,
                     build_symlink_attr(
                         inode,
@@ -237,60 +238,62 @@ impl GitSnapFs {
     }
 
     fn list_root(&self) -> io::Result<Vec<DirRecord>> {
-        let mut records = Vec::new();
-        records.push(DirRecord {
-            name: b".".to_vec(),
-            ino: ROOT_ID,
-            dtype: u32::from(libc::DT_DIR),
-            entry: Some(self.make_entry(ROOT_ID, self.root_attr())),
-        });
-        records.push(DirRecord {
-            name: b"..".to_vec(),
-            ino: ROOT_ID,
-            dtype: u32::from(libc::DT_DIR),
-            entry: Some(self.make_entry(ROOT_ID, self.root_attr())),
-        });
-        records.push(DirRecord {
-            name: b"commits".to_vec(),
-            ino: INODE_COMMITS,
-            dtype: u32::from(libc::DT_DIR),
-            entry: Some(self.synthetic_dir_entry(INODE_COMMITS)),
-        });
-        records.push(DirRecord {
-            name: b"branches".to_vec(),
-            ino: INODE_BRANCHES,
-            dtype: u32::from(libc::DT_DIR),
-            entry: Some(self.synthetic_dir_entry(INODE_BRANCHES)),
-        });
-        records.push(DirRecord {
-            name: b"tags".to_vec(),
-            ino: INODE_TAGS,
-            dtype: u32::from(libc::DT_DIR),
-            entry: Some(self.synthetic_dir_entry(INODE_TAGS)),
-        });
-        records.push(DirRecord {
-            name: b"HEAD".to_vec(),
-            ino: INODE_HEAD,
-            dtype: u32::from(libc::DT_LNK),
-            entry: Some(self.head_entry()?),
-        });
-        Ok(records)
+        let head_entry = self.head_entry()?;
+        Ok(vec![
+            DirRecord {
+                name: b".".to_vec(),
+                ino: ROOT_ID,
+                dtype: u32::from(libc::DT_DIR),
+                entry: Some(Self::make_entry(ROOT_ID, self.root_attr())),
+            },
+            DirRecord {
+                name: b"..".to_vec(),
+                ino: ROOT_ID,
+                dtype: u32::from(libc::DT_DIR),
+                entry: Some(Self::make_entry(ROOT_ID, self.root_attr())),
+            },
+            DirRecord {
+                name: b"commits".to_vec(),
+                ino: INODE_COMMITS,
+                dtype: u32::from(libc::DT_DIR),
+                entry: Some(self.synthetic_dir_entry(INODE_COMMITS)),
+            },
+            DirRecord {
+                name: b"branches".to_vec(),
+                ino: INODE_BRANCHES,
+                dtype: u32::from(libc::DT_DIR),
+                entry: Some(self.synthetic_dir_entry(INODE_BRANCHES)),
+            },
+            DirRecord {
+                name: b"tags".to_vec(),
+                ino: INODE_TAGS,
+                dtype: u32::from(libc::DT_DIR),
+                entry: Some(self.synthetic_dir_entry(INODE_TAGS)),
+            },
+            DirRecord {
+                name: b"HEAD".to_vec(),
+                ino: INODE_HEAD,
+                dtype: u32::from(libc::DT_LNK),
+                entry: Some(head_entry),
+            },
+        ])
     }
 
     fn list_commits_dir(&self) -> io::Result<Vec<DirRecord>> {
-        let mut records = Vec::new();
-        records.push(DirRecord {
-            name: b".".to_vec(),
-            ino: INODE_COMMITS,
-            dtype: u32::from(libc::DT_DIR),
-            entry: Some(self.synthetic_dir_entry(INODE_COMMITS)),
-        });
-        records.push(DirRecord {
-            name: b"..".to_vec(),
-            ino: ROOT_ID,
-            dtype: u32::from(libc::DT_DIR),
-            entry: Some(self.make_entry(ROOT_ID, self.root_attr())),
-        });
+        let mut records = vec![
+            DirRecord {
+                name: b".".to_vec(),
+                ino: INODE_COMMITS,
+                dtype: u32::from(libc::DT_DIR),
+                entry: Some(self.synthetic_dir_entry(INODE_COMMITS)),
+            },
+            DirRecord {
+                name: b"..".to_vec(),
+                ino: ROOT_ID,
+                dtype: u32::from(libc::DT_DIR),
+                entry: Some(Self::make_entry(ROOT_ID, self.root_attr())),
+            },
+        ];
         let commits = self.repo.list_commits().map_err(io::Error::other)?;
         for commit_id in commits {
             let inode = inode_from_oid(&commit_id);
@@ -299,7 +302,7 @@ impl GitSnapFs {
                 name,
                 ino: inode,
                 dtype: u32::from(libc::DT_DIR),
-                entry: Some(self.make_entry(
+                entry: Some(Self::make_entry(
                     inode,
                     build_dir_attr(inode, DIRECTORY_ATTR_MODE, self.mount_time),
                 )),
@@ -309,31 +312,30 @@ impl GitSnapFs {
     }
 
     fn list_refs_dir(&self, ns: RefNamespace) -> io::Result<Vec<DirRecord>> {
-        let mut records = Vec::new();
         let parent = ns.parent_inode();
-        records.push(DirRecord {
-            name: b".".to_vec(),
-            ino: parent,
-            dtype: u32::from(libc::DT_DIR),
-            entry: Some(self.synthetic_dir_entry(parent)),
-        });
-        records.push(DirRecord {
-            name: b"..".to_vec(),
-            ino: ROOT_ID,
-            dtype: u32::from(libc::DT_DIR),
-            entry: Some(self.make_entry(ROOT_ID, self.root_attr())),
-        });
+        let mut records = vec![
+            DirRecord {
+                name: b".".to_vec(),
+                ino: parent,
+                dtype: u32::from(libc::DT_DIR),
+                entry: Some(self.synthetic_dir_entry(parent)),
+            },
+            DirRecord {
+                name: b"..".to_vec(),
+                ino: ROOT_ID,
+                dtype: u32::from(libc::DT_DIR),
+                entry: Some(Self::make_entry(ROOT_ID, self.root_attr())),
+            },
+        ];
         let refs = ns.list(&self.repo)?;
         for (name, commit_id) in refs {
-            let mut target = Vec::new();
-            target.extend_from_slice(b"../commits/");
-            target.extend_from_slice(commit_id.to_string().as_bytes());
+            let target = format!("../commits/{commit_id}");
             let inode = synthetic_inode(ns.marker(), name.as_bytes());
             records.push(DirRecord {
                 name: name.into_bytes(),
                 ino: inode,
                 dtype: u32::from(libc::DT_LNK),
-                entry: Some(self.make_entry(
+                entry: Some(Self::make_entry(
                     inode,
                     build_symlink_attr(
                         inode,
@@ -354,7 +356,7 @@ impl GitSnapFs {
             TreeContext::Tree { tree_id } => (*tree_id, None),
         };
         let mut records = Vec::new();
-        let self_entry = Some(self.make_entry(
+        let self_entry = Some(Self::make_entry(
             inode,
             build_dir_attr(inode, DIRECTORY_ATTR_MODE, self.mount_time),
         ));
@@ -371,7 +373,7 @@ impl GitSnapFs {
             entry: Some(if let Some(parent_inode) = parent {
                 self.synthetic_dir_entry(parent_inode)
             } else {
-                self.make_entry(ROOT_ID, self.root_attr())
+                Self::make_entry(ROOT_ID, self.root_attr())
             }),
         });
 
@@ -424,7 +426,7 @@ impl GitSnapFs {
         for (name, commit_id) in refs {
             let candidate = synthetic_inode(ns.marker(), name.as_bytes());
             if candidate == inode {
-                return Ok(format!("../commits/{}", commit_id).into_bytes());
+                return Ok(format!("../commits/{commit_id}").into_bytes());
             }
         }
         Err(io::Error::from_raw_os_error(libc::ENOENT))
@@ -435,11 +437,7 @@ impl GitSnapFs {
             return Ok(self.root_attr());
         }
         if inode == INODE_COMMITS || inode == INODE_BRANCHES || inode == INODE_TAGS {
-            return Ok(build_dir_attr(
-                inode,
-                DIRECTORY_ATTR_MODE,
-                self.mount_time,
-            ));
+            return Ok(build_dir_attr(inode, DIRECTORY_ATTR_MODE, self.mount_time));
         }
         if inode == INODE_HEAD {
             let target = self.head_target()?;
@@ -471,11 +469,9 @@ impl GitSnapFs {
         let repo = self.repo.thread_local();
         let object = repo.find_object(oid).map_err(io::Error::other)?;
         match object.kind {
-            Kind::Commit | Kind::Tree => Ok(build_dir_attr(
-                inode,
-                DIRECTORY_ATTR_MODE,
-                self.mount_time,
-            )),
+            Kind::Commit | Kind::Tree => {
+                Ok(build_dir_attr(inode, DIRECTORY_ATTR_MODE, self.mount_time))
+            }
             Kind::Blob => {
                 let blob = repo.find_blob(oid).map_err(io::Error::other)?;
                 Ok(build_file_attr(
@@ -499,12 +495,7 @@ impl FileSystem for GitSnapFs {
     type Inode = u64;
     type Handle = u64;
 
-    fn lookup(
-        &self,
-        _ctx: &Context,
-        parent: Self::Inode,
-        name: &CStr,
-    ) -> io::Result<Entry> {
+    fn lookup(&self, _ctx: &Context, parent: Self::Inode, name: &CStr) -> io::Result<Entry> {
         let name = name.to_bytes();
         match parent {
             inode if inode == ROOT_ID => match name {
@@ -543,7 +534,6 @@ impl FileSystem for GitSnapFs {
     }
 
     fn readlink(&self, _ctx: &Context, inode: Self::Inode) -> io::Result<Vec<u8>> {
-        let inode = inode.into();
         if inode == INODE_HEAD {
             return self.head_target();
         }

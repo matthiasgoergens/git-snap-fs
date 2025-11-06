@@ -88,6 +88,7 @@ impl FuseRuntime {
             {
                 match e {
                     fuse_backend_rs::Error::EncodeMessage(ioe)
+                    // TODO: consider using a match or if-let instead of an if.
                         if ioe.raw_os_error() == Some(libc::EBADF) =>
                     {
                         break;

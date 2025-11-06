@@ -29,6 +29,8 @@ pub fn clear_cloexec(fd: RawFd) -> Result<()> {
 /// # Errors
 ///
 /// Returns an error if the path contains interior NUL bytes or if `execv` fails.
+///
+/// TODO: why do we need this?  We shouldn't be using any env variables!?
 pub fn exec_with_env(path: &Path, env: &[(&str, &str)]) -> Result<()> {
     let c_path = CString::new(path.as_os_str().as_bytes())
         .context("failed to convert exec path to CString")?;
