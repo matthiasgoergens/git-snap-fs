@@ -101,13 +101,26 @@ fn collect_refs(
     iter: gix::reference::iter::Iter<'_, '_>,
     prefix: &[u8],
 ) -> Result<Vec<(String, ObjectId)>> {
-    iter.map(|reference| {
-        let mut reference = reference.map_err(|err| anyhow!(err))?;
-        let id = reference.peel_to_id()?.detach();
-        let name_bytes = reference.name().as_bstr().as_bytes();
-        let short_bytes = name_bytes.strip_prefix(prefix).unwrap_or(name_bytes);
-        let short = String::from_utf8_lossy(short_bytes).into_owned();
-        Ok((short, id))
-    })
-    .collect()
+    iter.enumerate()
+        .map(|(i, reference)| {
+            let mut reference = reference.map_err(|err| {
+                eprintln!("ERROR: Failed to read reference #{i}: {err}");
+                anyhow!(err)
+            })?;
+
+            let ref_name_string = reference.name().as_bstr().to_string();
+            let id = reference
+                .peel_to_id()
+                .map_err(|err| {
+                    eprintln!("ERROR: Failed to peel reference '{ref_name_string}': {err}");
+                    anyhow!(err)
+                })?
+                .detach();
+
+            let name_bytes = ref_name_string.as_bytes();
+            let short_bytes = name_bytes.strip_prefix(prefix).unwrap_or(name_bytes);
+            let short = String::from_utf8_lossy(short_bytes).into_owned();
+            Ok((short, id))
+        })
+        .collect()
 }

@@ -25,9 +25,10 @@ const DIRECTORY_ATTR_MODE: u32 = S_IFDIR | 0o755;
 const SYMLINK_ATTR_MODE: u32 = S_IFLNK | 0o777;
 
 const INODE_COMMITS: u64 = 2;
-const INODE_BRANCHES: u64 = 3;
-const INODE_TAGS: u64 = 4;
-const INODE_HEAD: u64 = 5;
+const INODE_TREES: u64 = 3;
+const INODE_BRANCHES: u64 = 4;
+const INODE_TAGS: u64 = 5;
+const INODE_HEAD: u64 = 6;
 
 const NAMESPACE_BRANCH: u8 = 1;
 const NAMESPACE_TAG: u8 = 2;
@@ -42,7 +43,7 @@ struct DirRecord {
     entry: Option<Entry>,
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
 enum RefNamespace {
     Branches,
     Tags,
@@ -107,8 +108,25 @@ impl GitSnapFs {
         let commit_id = self
             .repo
             .resolve_full_commit_id(name_str)
-            .map_err(io::Error::other)?;
+            .map_err(|_| io::Error::from_raw_os_error(libc::ENOENT))?;
         let inode = inode_from_oid(&commit_id);
+        Ok(Self::make_entry(
+            inode,
+            build_dir_attr(inode, DIRECTORY_ATTR_MODE, self.mount_time),
+        ))
+    }
+
+    fn lookup_tree(&self, name: &[u8]) -> io::Result<Entry> {
+        let name_str =
+            str::from_utf8(name).map_err(|_| io::Error::from_raw_os_error(libc::ENOENT))?;
+        let repo = self.repo.thread_local();
+        let id = repo
+            .rev_parse_single(name_str.as_bytes().as_bstr())
+            .map_err(|_| io::Error::from_raw_os_error(libc::ENOENT))?
+            .detach();
+        repo.find_tree(id)
+            .map_err(|_| io::Error::from_raw_os_error(libc::ENOENT))?;
+        let inode = inode_from_oid(&id);
         Ok(Self::make_entry(
             inode,
             build_dir_attr(inode, DIRECTORY_ATTR_MODE, self.mount_time),
@@ -147,18 +165,28 @@ impl GitSnapFs {
     }
 
     fn tree_root_id(&self, inode: u64) -> io::Result<ObjectId> {
-        let oid = self.repo.resolve_inode(inode).map_err(io::Error::other)?;
+        let oid = self
+            .repo
+            .resolve_inode(inode)
+            .map_err(|_| io::Error::from_raw_os_error(libc::ENOENT))?;
         let repo = self.repo.thread_local();
-        let object = repo.find_object(oid).map_err(io::Error::other)?;
-        match object.kind {
-            gix::object::Kind::Commit => {
-                let commit = repo.find_commit(oid).map_err(io::Error::other)?;
-                let tree_id = commit.tree_id().map_err(io::Error::other)?.detach();
-                Ok(tree_id)
-            }
-            gix::object::Kind::Tree => Ok(oid),
-            _ => Err(io::Error::from_raw_os_error(libc::ENOTDIR)),
+
+        // Try as commit first (most common case)
+        if let Ok(commit) = repo.find_commit(oid) {
+            let tree_id = commit
+                .tree_id()
+                .map_err(|_| io::Error::from_raw_os_error(libc::ENOENT))?
+                .detach();
+            return Ok(tree_id);
         }
+
+        // Try as tree
+        if let Ok(_tree) = repo.find_tree(oid) {
+            return Ok(oid);
+        }
+
+        // Neither commit nor tree
+        Err(io::Error::from_raw_os_error(libc::ENOTDIR))
     }
 
     fn entry_for_tree_child(&self, mode: EntryMode, oid: ObjectId) -> io::Result<(Entry, u32)> {
@@ -171,7 +199,9 @@ impl GitSnapFs {
             ),
             EntryKind::Blob => {
                 let repo = self.repo.thread_local();
-                let blob = repo.find_blob(oid).map_err(io::Error::other)?;
+                let blob = repo
+                    .find_blob(oid)
+                    .map_err(|_| io::Error::from_raw_os_error(libc::ENOENT))?;
                 Self::make_entry(
                     inode,
                     build_file_attr(
@@ -184,7 +214,9 @@ impl GitSnapFs {
             }
             EntryKind::BlobExecutable => {
                 let repo = self.repo.thread_local();
-                let blob = repo.find_blob(oid).map_err(io::Error::other)?;
+                let blob = repo
+                    .find_blob(oid)
+                    .map_err(|_| io::Error::from_raw_os_error(libc::ENOENT))?;
                 Self::make_entry(
                     inode,
                     build_file_attr(
@@ -197,7 +229,9 @@ impl GitSnapFs {
             }
             EntryKind::Link => {
                 let repo = self.repo.thread_local();
-                let blob = repo.find_blob(oid).map_err(io::Error::other)?;
+                let blob = repo
+                    .find_blob(oid)
+                    .map_err(|_| io::Error::from_raw_os_error(libc::ENOENT))?;
                 Self::make_entry(
                     inode,
                     build_symlink_attr(
@@ -225,6 +259,12 @@ impl GitSnapFs {
                 ino: INODE_COMMITS,
                 dtype: u32::from(libc::DT_DIR),
                 entry: Some(self.synthetic_dir_entry(INODE_COMMITS)),
+            },
+            DirRecord {
+                name: b"trees".to_vec(),
+                ino: INODE_TREES,
+                dtype: u32::from(libc::DT_DIR),
+                entry: Some(self.synthetic_dir_entry(INODE_TREES)),
             },
             DirRecord {
                 name: b"branches".to_vec(),
@@ -266,11 +306,13 @@ impl GitSnapFs {
     fn list_tree_dir(&self, inode: u64) -> io::Result<Vec<DirRecord>> {
         let tree_id = self.tree_root_id(inode)?;
         let repo = self.repo.thread_local();
-        let tree = repo.find_tree(tree_id).map_err(io::Error::other)?;
+        let tree = repo
+            .find_tree(tree_id)
+            .map_err(|_| io::Error::from_raw_os_error(libc::ENOENT))?;
         let records = tree
             .iter()
             .map(|entry| {
-                let entry = entry.map_err(io::Error::other)?;
+                let entry = entry.map_err(|_| io::Error::from_raw_os_error(libc::ENOENT))?;
                 let oid = entry.inner.oid.to_owned();
                 let (child_entry, dtype) = self.entry_for_tree_child(entry.inner.mode, oid)?;
                 Ok(DirRecord {
@@ -291,6 +333,10 @@ impl GitSnapFs {
                 io::ErrorKind::Unsupported,
                 "enumerating the commits directory is not supported",
             )),
+            INODE_TREES => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "enumerating the trees directory is not supported",
+            )),
             INODE_BRANCHES => self.list_refs_dir(RefNamespace::Branches),
             INODE_TAGS => self.list_refs_dir(RefNamespace::Tags),
             _ => self.list_tree_dir(inode),
@@ -300,9 +346,11 @@ impl GitSnapFs {
     fn lookup_child(&self, parent: u64, name: &[u8]) -> io::Result<Entry> {
         let tree_id = self.tree_root_id(parent)?;
         let repo = self.repo.thread_local();
-        let tree = repo.find_tree(tree_id).map_err(io::Error::other)?;
+        let tree = repo
+            .find_tree(tree_id)
+            .map_err(|_| io::Error::from_raw_os_error(libc::ENOENT))?;
         for entry in tree.iter() {
-            let entry = entry.map_err(io::Error::other)?;
+            let entry = entry.map_err(|_| io::Error::from_raw_os_error(libc::ENOENT))?;
             if entry.inner.filename.as_bytes() == name {
                 let oid = entry.inner.oid.to_owned();
                 let (child_entry, _) = self.entry_for_tree_child(entry.inner.mode, oid)?;
@@ -319,7 +367,9 @@ impl GitSnapFs {
         object_id: ObjectId,
     ) -> io::Result<(u64, u32, Entry)> {
         let repo = self.repo.thread_local();
-        let object = repo.find_object(object_id).map_err(io::Error::other)?;
+        let object = repo
+            .find_object(object_id)
+            .map_err(|_| io::Error::from_raw_os_error(libc::ENOENT))?;
         match object.kind {
             Kind::Commit => {
                 let inode = synthetic_inode(ns.marker(), name);
@@ -336,16 +386,24 @@ impl GitSnapFs {
                 Ok((inode, u32::from(libc::DT_LNK), entry))
             }
             Kind::Tree => {
-                let inode = inode_from_oid(&object_id);
+                let inode = synthetic_inode(ns.marker(), name);
+                let target = format!("../trees/{object_id}");
                 let entry = Self::make_entry(
                     inode,
-                    build_dir_attr(inode, DIRECTORY_ATTR_MODE, self.mount_time),
+                    build_symlink_attr(
+                        inode,
+                        SYMLINK_ATTR_MODE,
+                        self.mount_time,
+                        target.len() as u64,
+                    ),
                 );
-                Ok((inode, u32::from(libc::DT_DIR), entry))
+                Ok((inode, u32::from(libc::DT_LNK), entry))
             }
             Kind::Blob => {
                 let inode = inode_from_oid(&object_id);
-                let blob = repo.find_blob(object_id).map_err(io::Error::other)?;
+                let blob = repo
+                    .find_blob(object_id)
+                    .map_err(|_| io::Error::from_raw_os_error(libc::ENOENT))?;
                 let entry = Self::make_entry(
                     inode,
                     build_file_attr(
@@ -365,10 +423,21 @@ impl GitSnapFs {
 
     fn reference_target(&self, inode: u64, ns: RefNamespace) -> io::Result<Vec<u8>> {
         let refs = ns.list(&self.repo)?;
-        for (name, commit_id) in refs {
+        for (name, object_id) in refs {
             let candidate = synthetic_inode(ns.marker(), name.as_bytes());
             if candidate == inode {
-                return Ok(format!("../commits/{commit_id}").into_bytes());
+                let repo = self.repo.thread_local();
+                let object = repo
+                    .find_object(object_id)
+                    .map_err(|_| io::Error::from_raw_os_error(libc::ENOENT))?;
+                let target = match object.kind {
+                    Kind::Commit => format!("../commits/{object_id}"),
+                    Kind::Tree => format!("../trees/{object_id}"),
+                    _ => {
+                        return Err(io::Error::from_raw_os_error(libc::EINVAL));
+                    }
+                };
+                return Ok(target.into_bytes());
             }
         }
         Err(io::Error::from_raw_os_error(libc::ENOENT))
@@ -378,7 +447,11 @@ impl GitSnapFs {
         if inode == ROOT_ID {
             return Ok(self.root_attr());
         }
-        if inode == INODE_COMMITS || inode == INODE_BRANCHES || inode == INODE_TAGS {
+        if inode == INODE_COMMITS
+            || inode == INODE_TREES
+            || inode == INODE_BRANCHES
+            || inode == INODE_TAGS
+        {
             return Ok(build_dir_attr(inode, DIRECTORY_ATTR_MODE, self.mount_time));
         }
         if inode == INODE_HEAD {
@@ -407,15 +480,22 @@ impl GitSnapFs {
             ));
         }
 
-        let oid = self.repo.resolve_inode(inode).map_err(io::Error::other)?;
+        let oid = self
+            .repo
+            .resolve_inode(inode)
+            .map_err(|_| io::Error::from_raw_os_error(libc::ENOENT))?;
         let repo = self.repo.thread_local();
-        let object = repo.find_object(oid).map_err(io::Error::other)?;
+        let object = repo
+            .find_object(oid)
+            .map_err(|_| io::Error::from_raw_os_error(libc::ENOENT))?;
         match object.kind {
             Kind::Commit | Kind::Tree => {
                 Ok(build_dir_attr(inode, DIRECTORY_ATTR_MODE, self.mount_time))
             }
             Kind::Blob => {
-                let blob = repo.find_blob(oid).map_err(io::Error::other)?;
+                let blob = repo
+                    .find_blob(oid)
+                    .map_err(|_| io::Error::from_raw_os_error(libc::ENOENT))?;
                 Ok(build_file_attr(
                     inode,
                     S_IFREG | 0o444,
@@ -461,12 +541,14 @@ impl FileSystem for GitSnapFs {
         match parent {
             inode if inode == ROOT_ID => match name {
                 b"commits" => Ok(self.synthetic_dir_entry(INODE_COMMITS)),
+                b"trees" => Ok(self.synthetic_dir_entry(INODE_TREES)),
                 b"branches" => Ok(self.synthetic_dir_entry(INODE_BRANCHES)),
                 b"tags" => Ok(self.synthetic_dir_entry(INODE_TAGS)),
                 b"HEAD" => self.head_entry(),
                 _ => Err(io::Error::from_raw_os_error(libc::ENOENT)),
             },
             inode if inode == INODE_COMMITS => self.lookup_commit(name),
+            inode if inode == INODE_TREES => self.lookup_tree(name),
             inode if inode == INODE_BRANCHES => self.lookup_reference(name, RefNamespace::Branches),
             inode if inode == INODE_TAGS => self.lookup_reference(name, RefNamespace::Tags),
             other => self.lookup_child(other, name),
@@ -505,9 +587,14 @@ impl FileSystem for GitSnapFs {
             return Ok(target);
         }
 
-        let oid = self.repo.resolve_inode(inode).map_err(io::Error::other)?;
+        let oid = self
+            .repo
+            .resolve_inode(inode)
+            .map_err(|_| io::Error::from_raw_os_error(libc::ENOENT))?;
         let repo = self.repo.thread_local();
-        let blob = repo.find_blob(oid).map_err(io::Error::other)?;
+        let blob = repo
+            .find_blob(oid)
+            .map_err(|_| io::Error::from_raw_os_error(libc::ENOENT))?;
         Ok(blob.data.as_slice().to_vec())
     }
 
@@ -672,9 +759,14 @@ impl FileSystem for GitSnapFs {
         _lock_owner: Option<u64>,
         _flags: u32,
     ) -> io::Result<usize> {
-        let oid = self.repo.resolve_inode(inode).map_err(io::Error::other)?;
+        let oid = self
+            .repo
+            .resolve_inode(inode)
+            .map_err(|_| io::Error::from_raw_os_error(libc::ENOENT))?;
         let repo = self.repo.thread_local();
-        let blob = repo.find_blob(oid).map_err(io::Error::other)?;
+        let blob = repo
+            .find_blob(oid)
+            .map_err(|_| io::Error::from_raw_os_error(libc::ENOENT))?;
         let data = blob.data.as_slice();
         let start =
             usize::try_from(offset).map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
