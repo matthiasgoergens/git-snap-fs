@@ -5,7 +5,9 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["GitSnapFS Contributors"]
 description = "Read-only FUSE filesystem exposing Git repository snapshots."
-repository = ""
+repository = "https://github.com/matthiasgoergens/git-snap-fs"
+keywords = ["fuse", "git", "filesystem"]
+categories = ["filesystem", "development-tools::debugging", "version-control"]
 
 [dependencies]
 anyhow = "1.0"
