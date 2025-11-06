@@ -24,21 +24,16 @@ pub fn clear_cloexec(fd: RawFd) -> Result<()> {
     Ok(())
 }
 
-/// Executes the current binary again, passing the provided environment overrides.
+/// Executes the current binary again using the existing environment.
 ///
 /// # Errors
 ///
 /// Returns an error if the path contains interior NUL bytes or if `execv` fails.
 ///
-/// TODO: why do we need this?  We shouldn't be using any env variables!?
-pub fn exec_with_env(path: &Path, env: &[(&str, &str)]) -> Result<()> {
+pub fn exec_with_env(path: &Path) -> Result<()> {
     let c_path = CString::new(path.as_os_str().as_bytes())
         .context("failed to convert exec path to CString")?;
     let args = [c_path.clone()];
-
-    for (key, value) in env {
-        std::env::set_var(key, value);
-    }
 
     execv(&c_path, &args).context("execv failed")?;
     Ok(())

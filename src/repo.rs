@@ -162,7 +162,5 @@ fn collect_refs(
         let short = String::from_utf8_lossy(short_bytes).into_owned();
         refs.push((short, id));
     }
-    // TODO: investigate if gix can provide a stable iteration.  (Sorting by name is not actually a good idea, as earlier names may appear when things change.)
-    refs.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(refs)
 }
