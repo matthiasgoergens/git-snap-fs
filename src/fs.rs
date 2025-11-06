@@ -261,45 +261,49 @@ impl GitSnapFs {
     }
 
     fn list_commits_dir(&self) -> io::Result<Vec<DirRecord>> {
-        let mut records = Vec::new();
         let commits = self.repo.list_commits().map_err(io::Error::other)?;
-        for commit_id in commits {
-            let inode = inode_from_oid(&commit_id);
-            let name = commit_id.to_string().into_bytes();
-            records.push(DirRecord {
-                name,
-                ino: inode,
-                dtype: u32::from(libc::DT_DIR),
-                entry: Some(Self::make_entry(
-                    inode,
-                    build_dir_attr(inode, DIRECTORY_ATTR_MODE, self.mount_time),
-                )),
-            });
-        }
+        let records = commits
+            .into_iter()
+            .map(|commit_id| {
+                let inode = inode_from_oid(&commit_id);
+                let name = commit_id.to_string().into_bytes();
+                DirRecord {
+                    name,
+                    ino: inode,
+                    dtype: u32::from(libc::DT_DIR),
+                    entry: Some(Self::make_entry(
+                        inode,
+                        build_dir_attr(inode, DIRECTORY_ATTR_MODE, self.mount_time),
+                    )),
+                }
+            })
+            .collect::<Vec<_>>();
         Ok(records)
     }
 
     fn list_refs_dir(&self, ns: RefNamespace) -> io::Result<Vec<DirRecord>> {
-        let mut records = Vec::new();
         let refs = ns.list(&self.repo)?;
-        for (name, commit_id) in refs {
-            let target = format!("../commits/{commit_id}");
-            let inode = synthetic_inode(ns.marker(), name.as_bytes());
-            records.push(DirRecord {
-                name: name.into_bytes(),
-                ino: inode,
-                dtype: u32::from(libc::DT_LNK),
-                entry: Some(Self::make_entry(
-                    inode,
-                    build_symlink_attr(
+        let records = refs
+            .into_iter()
+            .map(|(name, commit_id)| {
+                let target = format!("../commits/{commit_id}");
+                let inode = synthetic_inode(ns.marker(), name.as_bytes());
+                DirRecord {
+                    name: name.into_bytes(),
+                    ino: inode,
+                    dtype: u32::from(libc::DT_LNK),
+                    entry: Some(Self::make_entry(
                         inode,
-                        SYMLINK_ATTR_MODE,
-                        self.mount_time,
-                        target.len() as u64,
-                    ),
-                )),
-            });
-        }
+                        build_symlink_attr(
+                            inode,
+                            SYMLINK_ATTR_MODE,
+                            self.mount_time,
+                            target.len() as u64,
+                        ),
+                    )),
+                }
+            })
+            .collect();
         Ok(records)
     }
 
@@ -307,20 +311,22 @@ impl GitSnapFs {
         let tree_id = match self.tree_context(inode)? {
             TreeContext::Commit { tree_id } | TreeContext::Tree { tree_id } => tree_id,
         };
-        let mut records = Vec::new();
         let repo = self.repo.thread_local();
         let tree = repo.find_tree(tree_id).map_err(io::Error::other)?;
-        for entry in tree.iter() {
-            let entry = entry.map_err(io::Error::other)?;
-            let oid = entry.inner.oid.to_owned();
-            let (child_entry, dtype) = self.entry_for_tree_child(entry.inner.mode, oid)?;
-            records.push(DirRecord {
-                name: entry.inner.filename.as_bstr().to_vec(),
-                ino: child_entry.inode,
-                dtype,
-                entry: Some(child_entry),
-            });
-        }
+        let records = tree
+            .iter()
+            .map(|entry| {
+                let entry = entry.map_err(io::Error::other)?;
+                let oid = entry.inner.oid.to_owned();
+                let (child_entry, dtype) = self.entry_for_tree_child(entry.inner.mode, oid)?;
+                Ok(DirRecord {
+                    name: entry.inner.filename.as_bstr().to_vec(),
+                    ino: child_entry.inode,
+                    dtype,
+                    entry: Some(child_entry),
+                })
+            })
+            .collect::<io::Result<Vec<_>>>()?;
         Ok(records)
     }
 

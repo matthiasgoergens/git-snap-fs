@@ -3,12 +3,12 @@
 //! These abstractions wrap `gix` primitives so the filesystem code can remain
 //! largely agnostic of the underlying git library.
 
-use std::collections::HashSet;
 use std::path::Path;
 
 use anyhow::{anyhow, Context, Result};
-use gix::{bstr::ByteSlice, ObjectId, ThreadSafeRepository};
-use gix::{revision::walk::Sorting, traverse::commit::simple::CommitTimeOrder};
+use gix::objs::Kind;
+use gix::{self, bstr::ByteSlice, ObjectId, ThreadSafeRepository};
+use itertools::Itertools;
 
 use crate::inode::inode_to_hex_prefix;
 
@@ -82,54 +82,26 @@ impl Repository {
         collect_refs(iter, b"refs/tags/")
     }
 
-    /// List commits reachable from repository heads, branches, and tags.
+    /// List every commit object stored in the repository database.
     ///
     /// # Errors
     ///
-    /// Returns an error if traversing the commit graph fails.
+    /// Returns an error if iterating the object database or decoding objects fails.
     pub fn list_commits(&self) -> Result<Vec<ObjectId>> {
-        let mut tips = Vec::new();
-        let mut seen = HashSet::new();
-
-        if let Ok(head) = self.resolve_head() {
-            if seen.insert(head) {
-                tips.push(head);
-            }
-        }
-
-        for (_, id) in self.list_branches()? {
-            if seen.insert(id) {
-                tips.push(id);
-            }
-        }
-
-        for (_, id) in self.list_tags()? {
-            if seen.insert(id) {
-                tips.push(id);
-            }
-        }
-
-        if tips.is_empty() {
-            return Ok(Vec::new());
-        }
-
         let repo = self.inner.to_thread_local();
-        let walk = repo
-            .rev_walk(tips)
-            .sorting(Sorting::ByCommitTime(CommitTimeOrder::NewestFirst))
-            .all()
-            .map_err(|err| anyhow!(err))?;
-
-        let mut commits = Vec::new();
-        let mut seen_commits = HashSet::new();
-        for item in walk {
-            let info = item.map_err(|err| anyhow!(err))?;
-            if seen_commits.insert(info.id) {
-                commits.push(info.id);
-            }
-        }
-
-        Ok(commits)
+        let store = repo.objects.store();
+        let all = gix::odb::store::iter::AllObjects::new(&store).map_err(|err| anyhow!(err))?;
+        Ok(all
+            .flatten()
+            .filter(|oid| {
+                if let Ok(object) = repo.find_object(*oid) {
+                    object.kind == Kind::Commit
+                } else {
+                    false
+                }
+            })
+            .unique()
+            .collect::<Vec<_>>())
     }
 
     pub fn thread_local(&self) -> gix::Repository {

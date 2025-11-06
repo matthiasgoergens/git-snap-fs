@@ -8,12 +8,13 @@
 use gix::ObjectId;
 
 /// Convert a Git object id into a 64-bit inode by taking the low 64 bits.
+///
+/// # Panics
+///
+/// Panics if the object id is shorter than eight bytes, which cannot occur for valid Git object ids.
 #[must_use]
 pub fn inode_from_oid(oid: &ObjectId) -> u64 {
-    let bytes = oid.as_bytes();
-    let mut buf = [0u8; 8];
-    buf.copy_from_slice(&bytes[..8]);
-    u64::from_be_bytes(buf)
+    u64::from_be_bytes(oid.as_bytes()[..8].try_into().unwrap())
 }
 
 /// Render the inode as a hexadecimal prefix string suitable for prefix
