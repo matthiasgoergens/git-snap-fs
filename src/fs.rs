@@ -81,7 +81,7 @@ impl GitSnapFs {
     }
 
     fn root_attr(&self) -> stat64 {
-        build_dir_attr(ROOT_ID, ROOT_ATTR_MODE, self.mount_time)
+        build_attr(ROOT_ID, ROOT_ATTR_MODE, 0, self.mount_time)
     }
 
     fn make_entry(inode: u64, attr: stat64) -> Entry {
@@ -98,7 +98,7 @@ impl GitSnapFs {
     fn synthetic_dir_entry(&self, inode: u64) -> Entry {
         Self::make_entry(
             inode,
-            build_dir_attr(inode, DIRECTORY_ATTR_MODE, self.mount_time),
+            build_attr(inode, DIRECTORY_ATTR_MODE, 0, self.mount_time),
         )
     }
 
@@ -112,7 +112,7 @@ impl GitSnapFs {
         let inode = inode_from_oid(&commit_id);
         Ok(Self::make_entry(
             inode,
-            build_dir_attr(inode, DIRECTORY_ATTR_MODE, self.mount_time),
+            build_attr(inode, DIRECTORY_ATTR_MODE, 0, self.mount_time),
         ))
     }
 
@@ -129,7 +129,7 @@ impl GitSnapFs {
         let inode = inode_from_oid(&id);
         Ok(Self::make_entry(
             inode,
-            build_dir_attr(inode, DIRECTORY_ATTR_MODE, self.mount_time),
+            build_attr(inode, DIRECTORY_ATTR_MODE, 0, self.mount_time),
         ))
     }
 
@@ -150,7 +150,7 @@ impl GitSnapFs {
         let target = self.head_target()?;
         Ok(Self::make_entry(
             INODE_HEAD,
-            build_file_and_symlink_attr(
+            build_attr(
                 INODE_HEAD,
                 SYMLINK_ATTR_MODE,
                 target.len() as u64,
@@ -195,7 +195,7 @@ impl GitSnapFs {
         let entry = match kind {
             EntryKind::Tree | EntryKind::Commit => Self::make_entry(
                 inode,
-                build_dir_attr(inode, DIRECTORY_ATTR_MODE, self.mount_time),
+                build_attr(inode, DIRECTORY_ATTR_MODE, 0, self.mount_time),
             ),
             EntryKind::Blob => {
                 let repo = self.repo.thread_local();
@@ -204,7 +204,7 @@ impl GitSnapFs {
                     .map_err(|_| io::Error::from_raw_os_error(libc::ENOENT))?;
                 Self::make_entry(
                     inode,
-                    build_file_and_symlink_attr(
+                    build_attr(
                         inode,
                         S_IFREG | 0o444,
                         blob.data.len() as u64,
@@ -219,7 +219,7 @@ impl GitSnapFs {
                     .map_err(|_| io::Error::from_raw_os_error(libc::ENOENT))?;
                 Self::make_entry(
                     inode,
-                    build_file_and_symlink_attr(
+                    build_attr(
                         inode,
                         S_IFREG | 0o555,
                         blob.data.len() as u64,
@@ -234,7 +234,7 @@ impl GitSnapFs {
                     .map_err(|_| io::Error::from_raw_os_error(libc::ENOENT))?;
                 Self::make_entry(
                     inode,
-                    build_file_and_symlink_attr(
+                    build_attr(
                         inode,
                         SYMLINK_ATTR_MODE,
                         blob.data.len() as u64,
@@ -376,7 +376,7 @@ impl GitSnapFs {
                 let target = format!("../commits/{object_id}");
                 let entry = Self::make_entry(
                     inode,
-                    build_file_and_symlink_attr(
+                    build_attr(
                         inode,
                         SYMLINK_ATTR_MODE,
                         target.len() as u64,
@@ -390,7 +390,7 @@ impl GitSnapFs {
                 let target = format!("../trees/{object_id}");
                 let entry = Self::make_entry(
                     inode,
-                    build_file_and_symlink_attr(
+                    build_attr(
                         inode,
                         SYMLINK_ATTR_MODE,
                         target.len() as u64,
@@ -406,7 +406,7 @@ impl GitSnapFs {
                     .map_err(|_| io::Error::from_raw_os_error(libc::ENOENT))?;
                 let entry = Self::make_entry(
                     inode,
-                    build_file_and_symlink_attr(
+                    build_attr(
                         inode,
                         S_IFREG | 0o444,
                         blob.data.len() as u64,
@@ -452,11 +452,11 @@ impl GitSnapFs {
             || inode == INODE_BRANCHES
             || inode == INODE_TAGS
         {
-            return Ok(build_dir_attr(inode, DIRECTORY_ATTR_MODE, self.mount_time));
+            return Ok(build_attr(inode, DIRECTORY_ATTR_MODE, 0, self.mount_time));
         }
         if inode == INODE_HEAD {
             let target = self.head_target()?;
-            return Ok(build_file_and_symlink_attr(
+            return Ok(build_attr(
                 INODE_HEAD,
                 SYMLINK_ATTR_MODE,
                 target.len() as u64,
@@ -464,7 +464,7 @@ impl GitSnapFs {
             ));
         }
         if let Ok(target) = self.reference_target(inode, RefNamespace::Branches) {
-            return Ok(build_file_and_symlink_attr(
+            return Ok(build_attr(
                 inode,
                 SYMLINK_ATTR_MODE,
                 target.len() as u64,
@@ -472,7 +472,7 @@ impl GitSnapFs {
             ));
         }
         if let Ok(target) = self.reference_target(inode, RefNamespace::Tags) {
-            return Ok(build_file_and_symlink_attr(
+            return Ok(build_attr(
                 inode,
                 SYMLINK_ATTR_MODE,
                 target.len() as u64,
@@ -490,20 +490,20 @@ impl GitSnapFs {
             .map_err(|_| io::Error::from_raw_os_error(libc::ENOENT))?;
         match object.kind {
             Kind::Commit | Kind::Tree => {
-                Ok(build_dir_attr(inode, DIRECTORY_ATTR_MODE, self.mount_time))
+                Ok(build_attr(inode, DIRECTORY_ATTR_MODE, 0, self.mount_time))
             }
             Kind::Blob => {
                 let blob = repo
                     .find_blob(oid)
                     .map_err(|_| io::Error::from_raw_os_error(libc::ENOENT))?;
-                Ok(build_file_and_symlink_attr(
+                Ok(build_attr(
                     inode,
                     S_IFREG | 0o444,
                     blob.data.len() as u64,
                     self.mount_time,
                 ))
             }
-            Kind::Tag => Ok(build_file_and_symlink_attr(
+            Kind::Tag => Ok(build_attr(
                 inode,
                 S_IFREG | 0o444,
                 object.data.len() as u64,
@@ -827,11 +827,11 @@ fn synthetic_inode(namespace: u8, name: &[u8]) -> u64 {
     (u64::from(namespace) << 56) | (hash & 0x00FF_FFFF_FFFF_FFFF)
 }
 
-fn build_attr(inode: u64, mode: u32, size: i64, time_parts: (i64, i64)) -> stat64 {
+fn build_attr(inode: u64, mode: u32, size: u64, time_parts: (i64, i64)) -> stat64 {
     let (secs, nsecs) = time_parts;
     let attr = Attr {
         ino: inode,
-        size: u64::try_from(size).unwrap_or(u64::MAX),
+        size,
         blocks: 0,
         atime: u64::try_from(secs).unwrap_or_default(),
         mtime: u64::try_from(secs).unwrap_or_default(),
@@ -850,30 +850,18 @@ fn build_attr(inode: u64, mode: u32, size: i64, time_parts: (i64, i64)) -> stat6
     attr.into()
 }
 
-fn build_dir_attr(inode: u64, mode: u32, time_parts: (i64, i64)) -> stat64 {
-    build_attr(inode, mode, 0, time_parts)
-}
-
-fn build_file_and_symlink_attr(inode: u64, mode: u32, size: u64, time_parts: (i64, i64)) -> stat64 {
-    build_attr(inode, mode, saturating_i64_from_u64(size), time_parts)
-}
-
 fn time_to_unix_parts(time: SystemTime) -> (i64, i64) {
     match time.duration_since(UNIX_EPOCH) {
         Ok(duration) => (
-            saturating_i64_from_u64(duration.as_secs()),
+            i64::try_from(duration.as_secs()).unwrap_or(i64::MAX),
             i64::from(duration.subsec_nanos()),
         ),
         Err(err) => {
             let duration = err.duration();
             (
-                -saturating_i64_from_u64(duration.as_secs()),
+                -i64::try_from(duration.as_secs()).unwrap_or(i64::MAX),
                 i64::from(duration.subsec_nanos()),
             )
         }
     }
-}
-
-fn saturating_i64_from_u64(value: u64) -> i64 {
-    i64::try_from(value).unwrap_or(i64::MAX)
 }
