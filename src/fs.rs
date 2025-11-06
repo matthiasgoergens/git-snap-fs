@@ -739,11 +739,10 @@ impl FileSystem for GitSnapFs {
     fn open(
         &self,
         _ctx: &Context,
-        inode: Self::Inode,
-        flags: u32,
+        _inode: Self::Inode,
+        _flags: u32,
         _fuse_flags: u32,
     ) -> io::Result<(Option<Self::Handle>, OpenOptions, Option<u32>)> {
-        let _ = (inode, flags);
         Err(io::Error::from_raw_os_error(libc::ENOSYS))
     }
 
