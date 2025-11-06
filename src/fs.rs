@@ -163,7 +163,7 @@ impl GitSnapFs {
 
     fn head_target(&self) -> io::Result<Vec<u8>> {
         let commit_id = self.repo.resolve_head().map_err(io::Error::other)?;
-        Ok(format!("../commits/{commit_id}").into_bytes())
+        Ok(format!("commits/{commit_id}").into_bytes())
     }
 
     fn tree_context(&self, inode: u64) -> io::Result<TreeContext> {
