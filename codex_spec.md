@@ -102,7 +102,7 @@ Expose a Git repository as a read-only filesystem:
 - **Cached** in kernel: use as much of FUSE’s caches as possible. Don’t do our own caching (unless profiling later suggests otherwise).  
 - **Times**: use commit’s committer time for entries beneath `/commits/<id>`; dirs `0555`; files `0444/0555`; symlinks `0777`. (But we can review this. Do whatever is simplest first.)
 - `cargo check` should pass without warnings, same for `cargo clippy --all-targets --all-features -- -D warnings`.
-- `cargo clippy --all-targets --all-features -- -D clippy::pedantic` should also pass without warnings, unless there is a good reason not to.  In that case, explain the reason in a comment and suppress the specific lint for that line or block.  Do the same for `clippy::
+- `cargo clippy --all-targets --all-features -- -D clippy::pedantic` should also pass without warnings, unless there is a good reason not to.  In that case, explain the reason in a comment and suppress the specific lint for that line or block.  Do the same for `clippy::cargo`.
 
 ### Freshness
 
