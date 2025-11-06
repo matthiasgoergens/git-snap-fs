@@ -67,6 +67,7 @@ impl RefNamespace {
 
 pub struct GitSnapFs {
     repo: Repository,
+    // TODO: instead of running time_to_unix_parts etc every time we need to build an attr, we can just do it once at the beginning, and store the result here, instead of storing as a SystemTime.
     mount_time: SystemTime,
 }
 
@@ -449,7 +450,7 @@ impl FileSystem for GitSnapFs {
         let supported = capable & wanted;
         if !supported.contains(required) {
             return Err(io::Error::other(
-                "kernel does not advertise required zero-message capabilities",
+                "kernel does not advertise required export support or zero-message open capabilities"
             ));
         }
         Ok(supported)
@@ -620,11 +621,10 @@ impl FileSystem for GitSnapFs {
         add_entry: &mut dyn FnMut(DirEntry, Entry) -> io::Result<usize>,
     ) -> io::Result<()> {
         let records = self.list_directory(inode)?;
-        for (index, record) in records.into_iter().enumerate() {
+        let start =
+            usize::try_from(offset).map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
+        for (index, record) in records.into_iter().enumerate().skip(start) {
             let entry_offset = index as u64;
-            if offset > entry_offset {
-                continue;
-            }
             if let Some(entry) = record.entry {
                 let dirent = DirEntry {
                     ino: record.ino,
@@ -762,6 +762,7 @@ fn build_dir_attr(inode: u64, mode: u32, time: SystemTime) -> stat64 {
     build_attr(inode, mode, 2, 0, time)
 }
 
+// TODO: unify file and symlink attr builders.  They are virtually identical.
 fn build_file_attr(inode: u64, mode: u32, size: u64, time: SystemTime) -> stat64 {
     build_attr(inode, mode, 1, saturating_i64_from_u64(size), time)
 }
