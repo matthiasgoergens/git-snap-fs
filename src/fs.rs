@@ -150,11 +150,11 @@ impl GitSnapFs {
         let target = self.head_target()?;
         Ok(Self::make_entry(
             INODE_HEAD,
-            build_symlink_attr(
+            build_file_and_symlink_attr(
                 INODE_HEAD,
                 SYMLINK_ATTR_MODE,
-                self.mount_time,
                 target.len() as u64,
+                self.mount_time,
             ),
         ))
     }
@@ -204,7 +204,7 @@ impl GitSnapFs {
                     .map_err(|_| io::Error::from_raw_os_error(libc::ENOENT))?;
                 Self::make_entry(
                     inode,
-                    build_file_attr(
+                    build_file_and_symlink_attr(
                         inode,
                         S_IFREG | 0o444,
                         blob.data.len() as u64,
@@ -219,7 +219,7 @@ impl GitSnapFs {
                     .map_err(|_| io::Error::from_raw_os_error(libc::ENOENT))?;
                 Self::make_entry(
                     inode,
-                    build_file_attr(
+                    build_file_and_symlink_attr(
                         inode,
                         S_IFREG | 0o555,
                         blob.data.len() as u64,
@@ -234,11 +234,11 @@ impl GitSnapFs {
                     .map_err(|_| io::Error::from_raw_os_error(libc::ENOENT))?;
                 Self::make_entry(
                     inode,
-                    build_symlink_attr(
+                    build_file_and_symlink_attr(
                         inode,
                         SYMLINK_ATTR_MODE,
-                        self.mount_time,
                         blob.data.len() as u64,
+                        self.mount_time,
                     ),
                 )
             }
@@ -376,11 +376,11 @@ impl GitSnapFs {
                 let target = format!("../commits/{object_id}");
                 let entry = Self::make_entry(
                     inode,
-                    build_symlink_attr(
+                    build_file_and_symlink_attr(
                         inode,
                         SYMLINK_ATTR_MODE,
-                        self.mount_time,
                         target.len() as u64,
+                        self.mount_time,
                     ),
                 );
                 Ok((inode, u32::from(libc::DT_LNK), entry))
@@ -390,11 +390,11 @@ impl GitSnapFs {
                 let target = format!("../trees/{object_id}");
                 let entry = Self::make_entry(
                     inode,
-                    build_symlink_attr(
+                    build_file_and_symlink_attr(
                         inode,
                         SYMLINK_ATTR_MODE,
-                        self.mount_time,
                         target.len() as u64,
+                        self.mount_time,
                     ),
                 );
                 Ok((inode, u32::from(libc::DT_LNK), entry))
@@ -406,7 +406,7 @@ impl GitSnapFs {
                     .map_err(|_| io::Error::from_raw_os_error(libc::ENOENT))?;
                 let entry = Self::make_entry(
                     inode,
-                    build_file_attr(
+                    build_file_and_symlink_attr(
                         inode,
                         S_IFREG | 0o444,
                         blob.data.len() as u64,
@@ -456,27 +456,27 @@ impl GitSnapFs {
         }
         if inode == INODE_HEAD {
             let target = self.head_target()?;
-            return Ok(build_symlink_attr(
+            return Ok(build_file_and_symlink_attr(
                 INODE_HEAD,
                 SYMLINK_ATTR_MODE,
-                self.mount_time,
                 target.len() as u64,
+                self.mount_time,
             ));
         }
         if let Ok(target) = self.reference_target(inode, RefNamespace::Branches) {
-            return Ok(build_symlink_attr(
+            return Ok(build_file_and_symlink_attr(
                 inode,
                 SYMLINK_ATTR_MODE,
-                self.mount_time,
                 target.len() as u64,
+                self.mount_time,
             ));
         }
         if let Ok(target) = self.reference_target(inode, RefNamespace::Tags) {
-            return Ok(build_symlink_attr(
+            return Ok(build_file_and_symlink_attr(
                 inode,
                 SYMLINK_ATTR_MODE,
-                self.mount_time,
                 target.len() as u64,
+                self.mount_time,
             ));
         }
 
@@ -496,14 +496,14 @@ impl GitSnapFs {
                 let blob = repo
                     .find_blob(oid)
                     .map_err(|_| io::Error::from_raw_os_error(libc::ENOENT))?;
-                Ok(build_file_attr(
+                Ok(build_file_and_symlink_attr(
                     inode,
                     S_IFREG | 0o444,
                     blob.data.len() as u64,
                     self.mount_time,
                 ))
             }
-            Kind::Tag => Ok(build_file_attr(
+            Kind::Tag => Ok(build_file_and_symlink_attr(
                 inode,
                 S_IFREG | 0o444,
                 object.data.len() as u64,
@@ -854,12 +854,7 @@ fn build_dir_attr(inode: u64, mode: u32, time: SystemTime) -> stat64 {
     build_attr(inode, mode, 2, 0, time)
 }
 
-// TODO: unify file and symlink attr builders.  They are virtually identical.
-fn build_file_attr(inode: u64, mode: u32, size: u64, time: SystemTime) -> stat64 {
-    build_attr(inode, mode, 1, saturating_i64_from_u64(size), time)
-}
-
-fn build_symlink_attr(inode: u64, mode: u32, time: SystemTime, size: u64) -> stat64 {
+fn build_file_and_symlink_attr(inode: u64, mode: u32, size: u64, time: SystemTime) -> stat64 {
     build_attr(inode, mode, 1, saturating_i64_from_u64(size), time)
 }
 
