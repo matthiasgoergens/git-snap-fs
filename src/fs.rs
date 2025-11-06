@@ -170,23 +170,23 @@ impl GitSnapFs {
             .resolve_inode(inode)
             .map_err(|_| io::Error::from_raw_os_error(libc::ENOENT))?;
         let repo = self.repo.thread_local();
-
-        // Try as commit first (most common case)
-        if let Ok(commit) = repo.find_commit(oid) {
-            let tree_id = commit
-                .tree_id()
-                .map_err(|_| io::Error::from_raw_os_error(libc::ENOENT))?
-                .detach();
-            return Ok(tree_id);
+        let object = repo
+            .find_object(oid)
+            .map_err(|_| io::Error::from_raw_os_error(libc::ENOENT))?;
+        match object.kind {
+            gix::object::Kind::Commit => {
+                let commit = repo
+                    .find_commit(oid)
+                    .map_err(|_| io::Error::from_raw_os_error(libc::ENOENT))?;
+                let tree_id = commit
+                    .tree_id()
+                    .map_err(|_| io::Error::from_raw_os_error(libc::ENOENT))?
+                    .detach();
+                Ok(tree_id)
+            }
+            gix::object::Kind::Tree => Ok(oid),
+            _ => Err(io::Error::from_raw_os_error(libc::ENOTDIR)),
         }
-
-        // Try as tree
-        if let Ok(_tree) = repo.find_tree(oid) {
-            return Ok(oid);
-        }
-
-        // Neither commit nor tree
-        Err(io::Error::from_raw_os_error(libc::ENOTDIR))
     }
 
     fn entry_for_tree_child(&self, mode: EntryMode, oid: ObjectId) -> io::Result<(Entry, u32)> {
