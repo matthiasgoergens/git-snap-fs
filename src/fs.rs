@@ -261,24 +261,8 @@ impl GitSnapFs {
     }
 
     fn list_commits_dir(&self) -> io::Result<Vec<DirRecord>> {
-        let commits = self.repo.list_commits().map_err(io::Error::other)?;
-        let records = commits
-            .into_iter()
-            .map(|commit_id| {
-                let inode = inode_from_oid(&commit_id);
-                let name = commit_id.to_string().into_bytes();
-                DirRecord {
-                    name,
-                    ino: inode,
-                    dtype: u32::from(libc::DT_DIR),
-                    entry: Some(Self::make_entry(
-                        inode,
-                        build_dir_attr(inode, DIRECTORY_ATTR_MODE, self.mount_time),
-                    )),
-                }
-            })
-            .collect::<Vec<_>>();
-        Ok(records)
+        // Enumerating every commit does not scale; signal that the operation is unsupported.
+        Err(io::Error::from_raw_os_error(libc::ENOTSUP))
     }
 
     fn list_refs_dir(&self, ns: RefNamespace) -> io::Result<Vec<DirRecord>> {

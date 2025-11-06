@@ -7,10 +7,8 @@ use std::path::Path;
 
 use anyhow::{anyhow, Context, Result};
 
-use gix::{self, bstr::ByteSlice, ObjectId, ThreadSafeRepository};
-use itertools::Itertools;
-
 use crate::inode::inode_to_hex_prefix;
+use gix::{self, bstr::ByteSlice, ObjectId, ThreadSafeRepository};
 
 /// Minimal repository wrapper that keeps a thread-safe handle.
 #[derive(Debug)]
@@ -80,24 +78,6 @@ impl Repository {
         let platform = repo.references()?;
         let iter = platform.tags()?.peeled()?;
         collect_refs(iter, b"refs/tags/")
-    }
-
-    /// List every commit object stored in the repository database.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if iterating the object database or decoding objects fails.
-    pub fn list_commits(&self) -> Result<Vec<ObjectId>> {
-        let repo = self.inner.to_thread_local();
-        let store = repo.objects.store();
-        let all = gix::odb::store::iter::AllObjects::new(&store).map_err(|err| anyhow!(err))?;
-        all.map(|r_oid| {
-            let oid = r_oid.map_err(|err| anyhow!(err))?;
-            let commit = repo.find_commit(oid).map_err(|err| anyhow!(err))?;
-            Ok(commit.id)
-        })
-        .unique_by(|r_oid| r_oid.as_ref().ok().copied())
-        .collect::<Result<Vec<_>>>()
     }
 
     pub fn thread_local(&self) -> gix::Repository {

@@ -100,11 +100,3 @@ impl FuseRuntime {
         Ok(())
     }
 }
-
-impl Drop for FuseRuntime {
-    fn drop(&mut self) {
-        if let Err(err) = self.session.umount() {
-            error!(?err, "failed to unmount FUSE session");
-        }
-    }
-}
