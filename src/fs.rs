@@ -42,11 +42,6 @@ struct DirRecord {
     entry: Option<Entry>,
 }
 
-enum TreeContext {
-    Commit { tree_id: ObjectId },
-    Tree { tree_id: ObjectId },
-}
-
 #[derive(Copy, Clone)]
 enum RefNamespace {
     Branches,
@@ -150,7 +145,7 @@ impl GitSnapFs {
         Ok(format!("commits/{commit_id}").into_bytes())
     }
 
-    fn tree_context(&self, inode: u64) -> io::Result<TreeContext> {
+    fn tree_root_id(&self, inode: u64) -> io::Result<ObjectId> {
         let oid = self.repo.resolve_inode(inode).map_err(io::Error::other)?;
         let repo = self.repo.thread_local();
         let object = repo.find_object(oid).map_err(io::Error::other)?;
@@ -158,9 +153,9 @@ impl GitSnapFs {
             gix::object::Kind::Commit => {
                 let commit = repo.find_commit(oid).map_err(io::Error::other)?;
                 let tree_id = commit.tree_id().map_err(io::Error::other)?.detach();
-                Ok(TreeContext::Commit { tree_id })
+                Ok(tree_id)
             }
-            gix::object::Kind::Tree => Ok(TreeContext::Tree { tree_id: oid }),
+            gix::object::Kind::Tree => Ok(oid),
             _ => Err(io::Error::from_raw_os_error(libc::ENOTDIR)),
         }
     }
@@ -268,9 +263,7 @@ impl GitSnapFs {
     }
 
     fn list_tree_dir(&self, inode: u64) -> io::Result<Vec<DirRecord>> {
-        let tree_id = match self.tree_context(inode)? {
-            TreeContext::Commit { tree_id } | TreeContext::Tree { tree_id } => tree_id,
-        };
+        let tree_id = self.tree_root_id(inode)?;
         let repo = self.repo.thread_local();
         let tree = repo.find_tree(tree_id).map_err(io::Error::other)?;
         let records = tree
@@ -304,10 +297,7 @@ impl GitSnapFs {
     }
 
     fn lookup_child(&self, parent: u64, name: &[u8]) -> io::Result<Entry> {
-        let context = self.tree_context(parent)?;
-        let tree_id = match context {
-            TreeContext::Commit { tree_id } | TreeContext::Tree { tree_id } => tree_id,
-        };
+        let tree_id = self.tree_root_id(parent)?;
         let repo = self.repo.thread_local();
         let tree = repo.find_tree(tree_id).map_err(io::Error::other)?;
         for entry in tree.iter() {
