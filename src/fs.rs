@@ -8,7 +8,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use fuse_backend_rs::abi::fuse_abi::{stat64, Attr, CreateIn, ROOT_ID};
 use fuse_backend_rs::api::filesystem::{
-    Context, DirEntry, Entry, FileSystem, OpenOptions, SetattrValid, ZeroCopyReader, ZeroCopyWriter,
+    Context, DirEntry, Entry, FileSystem, FsOptions, OpenOptions, SetattrValid, ZeroCopyReader,
+    ZeroCopyWriter,
 };
 use gix::bstr::ByteSlice;
 use gix::object::tree::{EntryKind, EntryMode};
@@ -66,13 +67,6 @@ impl RefNamespace {
             RefNamespace::Tags => repo.list_tags(),
         }
         .map_err(io::Error::other)
-    }
-
-    fn parent_inode(self) -> u64 {
-        match self {
-            RefNamespace::Branches => INODE_BRANCHES,
-            RefNamespace::Tags => INODE_TAGS,
-        }
     }
 }
 
@@ -240,18 +234,6 @@ impl GitSnapFs {
         let head_entry = self.head_entry()?;
         Ok(vec![
             DirRecord {
-                name: b".".to_vec(),
-                ino: ROOT_ID,
-                dtype: u32::from(libc::DT_DIR),
-                entry: Some(Self::make_entry(ROOT_ID, self.root_attr())),
-            },
-            DirRecord {
-                name: b"..".to_vec(),
-                ino: ROOT_ID,
-                dtype: u32::from(libc::DT_DIR),
-                entry: Some(Self::make_entry(ROOT_ID, self.root_attr())),
-            },
-            DirRecord {
                 name: b"commits".to_vec(),
                 ino: INODE_COMMITS,
                 dtype: u32::from(libc::DT_DIR),
@@ -279,20 +261,7 @@ impl GitSnapFs {
     }
 
     fn list_commits_dir(&self) -> io::Result<Vec<DirRecord>> {
-        let mut records = vec![
-            DirRecord {
-                name: b".".to_vec(),
-                ino: INODE_COMMITS,
-                dtype: u32::from(libc::DT_DIR),
-                entry: Some(self.synthetic_dir_entry(INODE_COMMITS)),
-            },
-            DirRecord {
-                name: b"..".to_vec(),
-                ino: ROOT_ID,
-                dtype: u32::from(libc::DT_DIR),
-                entry: Some(Self::make_entry(ROOT_ID, self.root_attr())),
-            },
-        ];
+        let mut records = Vec::new();
         let commits = self.repo.list_commits().map_err(io::Error::other)?;
         for commit_id in commits {
             let inode = inode_from_oid(&commit_id);
@@ -311,21 +280,7 @@ impl GitSnapFs {
     }
 
     fn list_refs_dir(&self, ns: RefNamespace) -> io::Result<Vec<DirRecord>> {
-        let parent = ns.parent_inode();
-        let mut records = vec![
-            DirRecord {
-                name: b".".to_vec(),
-                ino: parent,
-                dtype: u32::from(libc::DT_DIR),
-                entry: Some(self.synthetic_dir_entry(parent)),
-            },
-            DirRecord {
-                name: b"..".to_vec(),
-                ino: ROOT_ID,
-                dtype: u32::from(libc::DT_DIR),
-                entry: Some(Self::make_entry(ROOT_ID, self.root_attr())),
-            },
-        ];
+        let mut records = Vec::new();
         let refs = ns.list(&self.repo)?;
         for (name, commit_id) in refs {
             let target = format!("../commits/{commit_id}");
@@ -349,33 +304,10 @@ impl GitSnapFs {
     }
 
     fn list_tree_dir(&self, inode: u64) -> io::Result<Vec<DirRecord>> {
-        let context = self.tree_context(inode)?;
-        let (tree_id, parent) = match &context {
-            TreeContext::Commit { tree_id } => (*tree_id, Some(INODE_COMMITS)),
-            TreeContext::Tree { tree_id } => (*tree_id, None),
+        let tree_id = match self.tree_context(inode)? {
+            TreeContext::Commit { tree_id } | TreeContext::Tree { tree_id } => tree_id,
         };
         let mut records = Vec::new();
-        let self_entry = Some(Self::make_entry(
-            inode,
-            build_dir_attr(inode, DIRECTORY_ATTR_MODE, self.mount_time),
-        ));
-        records.push(DirRecord {
-            name: b".".to_vec(),
-            ino: inode,
-            dtype: u32::from(libc::DT_DIR),
-            entry: self_entry,
-        });
-        records.push(DirRecord {
-            name: b"..".to_vec(),
-            ino: parent.unwrap_or(ROOT_ID),
-            dtype: u32::from(libc::DT_DIR),
-            entry: Some(if let Some(parent_inode) = parent {
-                self.synthetic_dir_entry(parent_inode)
-            } else {
-                Self::make_entry(ROOT_ID, self.root_attr())
-            }),
-        });
-
         let repo = self.repo.thread_local();
         let tree = repo.find_tree(tree_id).map_err(io::Error::other)?;
         for entry in tree.iter() {
@@ -493,6 +425,24 @@ impl GitSnapFs {
 impl FileSystem for GitSnapFs {
     type Inode = u64;
     type Handle = u64;
+
+    fn init(&self, capable: FsOptions) -> io::Result<FsOptions> {
+        let required = FsOptions::EXPORT_SUPPORT;
+        let optional = FsOptions::ASYNC_READ
+            | FsOptions::DO_READDIRPLUS
+            | FsOptions::READDIRPLUS_AUTO
+            | FsOptions::PARALLEL_DIROPS
+            | FsOptions::CACHE_SYMLINKS;
+        let wanted = required | optional;
+        let supported = capable & wanted;
+        if !supported.contains(required) {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "kernel does not advertise EXPORT_SUPPORT",
+            ));
+        }
+        Ok(supported)
+    }
 
     fn lookup(&self, _ctx: &Context, parent: Self::Inode, name: &CStr) -> io::Result<Entry> {
         let name = name.to_bytes();
