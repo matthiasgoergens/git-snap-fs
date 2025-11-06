@@ -427,7 +427,9 @@ impl FileSystem for GitSnapFs {
     type Handle = u64;
 
     fn init(&self, capable: FsOptions) -> io::Result<FsOptions> {
-        let required = FsOptions::EXPORT_SUPPORT;
+        let required = FsOptions::EXPORT_SUPPORT
+            | FsOptions::ZERO_MESSAGE_OPEN
+            | FsOptions::ZERO_MESSAGE_OPENDIR;
         let optional = FsOptions::ASYNC_READ
             | FsOptions::DO_READDIRPLUS
             | FsOptions::READDIRPLUS_AUTO
@@ -437,7 +439,7 @@ impl FileSystem for GitSnapFs {
         let supported = capable & wanted;
         if !supported.contains(required) {
             return Err(io::Error::other(
-                "kernel does not advertise EXPORT_SUPPORT",
+                "kernel does not advertise required zero-message capabilities",
             ));
         }
         Ok(supported)
@@ -629,6 +631,15 @@ impl FileSystem for GitSnapFs {
         Ok(())
     }
 
+    fn opendir(
+        &self,
+        _ctx: &Context,
+        _inode: Self::Inode,
+        _flags: u32,
+    ) -> io::Result<(Option<Self::Handle>, OpenOptions)> {
+        Err(io::Error::from_raw_os_error(libc::ENOSYS))
+    }
+
     fn open(
         &self,
         _ctx: &Context,
@@ -636,19 +647,8 @@ impl FileSystem for GitSnapFs {
         flags: u32,
         _fuse_flags: u32,
     ) -> io::Result<(Option<Self::Handle>, OpenOptions, Option<u32>)> {
-        let flag_bits =
-            i32::try_from(flags).map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
-        let access_mode = flag_bits & libc::O_ACCMODE;
-        if access_mode != libc::O_RDONLY {
-            return Err(io::Error::from_raw_os_error(libc::EROFS));
-        }
-        let oid = self.repo.resolve_inode(inode).map_err(io::Error::other)?;
-        let repo = self.repo.thread_local();
-        let object = repo.find_object(oid).map_err(io::Error::other)?;
-        if !matches!(object.kind, gix::object::Kind::Blob) {
-            return Err(io::Error::from_raw_os_error(libc::EISDIR));
-        }
-        Ok((Some(inode), OpenOptions::empty(), None))
+        let _ = (inode, flags);
+        Err(io::Error::from_raw_os_error(libc::ENOSYS))
     }
 
     #[allow(clippy::too_many_arguments)]
