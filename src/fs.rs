@@ -728,17 +728,16 @@ fn synthetic_inode(namespace: u8, name: &[u8]) -> u64 {
 
 fn build_attr(inode: u64, mode: u32, nlink: u32, size: i64, time: SystemTime) -> stat64 {
     let (secs, nsecs) = time_to_unix_parts(time);
-    debug_assert!(size >= 0, "size is expected to be non-negative");
     let attr = Attr {
         ino: inode,
-        size: size as u64,
+        size: u64::try_from(size).unwrap_or(u64::MAX),
         blocks: 0,
-        atime: secs as u64,
-        mtime: secs as u64,
-        ctime: secs as u64,
-        atimensec: nsecs as u32,
-        mtimensec: nsecs as u32,
-        ctimensec: nsecs as u32,
+        atime: u64::try_from(secs).unwrap_or_default(),
+        mtime: u64::try_from(secs).unwrap_or_default(),
+        ctime: u64::try_from(secs).unwrap_or_default(),
+        atimensec: u32::try_from(nsecs).unwrap_or_default(),
+        mtimensec: u32::try_from(nsecs).unwrap_or_default(),
+        ctimensec: u32::try_from(nsecs).unwrap_or_default(),
         mode,
         nlink,
         uid: 0,
