@@ -589,11 +589,8 @@ impl FileSystem for GitSnapFs {
         add_entry: &mut dyn FnMut(DirEntry) -> io::Result<usize>,
     ) -> io::Result<()> {
         let records = self.list_directory(inode)?;
-        for (index, record) in records.into_iter().enumerate() {
+        for (index, record) in records.into_iter().enumerate().skip(offset as usize) {
             let entry_offset = index as u64;
-            if offset > entry_offset {
-                continue;
-            }
             let dirent = DirEntry {
                 ino: record.ino,
                 offset: entry_offset + 1,

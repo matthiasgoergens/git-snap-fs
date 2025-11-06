@@ -18,9 +18,8 @@ pub fn clear_cloexec(fd: RawFd) -> Result<()> {
     if !flags.contains(FdFlag::FD_CLOEXEC) {
         return Ok(());
     }
-    let mut new_flags = flags;
-    new_flags.remove(FdFlag::FD_CLOEXEC);
-    fcntl(fd_ref, FcntlArg::F_SETFD(new_flags))
+    let flags = flags.difference(FdFlag::FD_CLOEXEC);
+    fcntl(fd_ref, FcntlArg::F_SETFD(flags))
         .with_context(|| format!("failed to clear FD_CLOEXEC on fd {fd}"))?;
     Ok(())
 }

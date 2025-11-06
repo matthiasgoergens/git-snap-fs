@@ -6,7 +6,7 @@
 use std::path::Path;
 
 use anyhow::{anyhow, Context, Result};
-use gix::objs::Kind;
+
 use gix::{self, bstr::ByteSlice, ObjectId, ThreadSafeRepository};
 use itertools::Itertools;
 
@@ -91,17 +91,13 @@ impl Repository {
         let repo = self.inner.to_thread_local();
         let store = repo.objects.store();
         let all = gix::odb::store::iter::AllObjects::new(&store).map_err(|err| anyhow!(err))?;
-        Ok(all
-            .flatten()
-            .filter(|oid| {
-                if let Ok(object) = repo.find_object(*oid) {
-                    object.kind == Kind::Commit
-                } else {
-                    false
-                }
-            })
-            .unique()
-            .collect::<Vec<_>>())
+        all.map(|r_oid| {
+            let oid = r_oid.map_err(|err| anyhow!(err))?;
+            let commit = repo.find_commit(oid).map_err(|err| anyhow!(err))?;
+            Ok(commit.id)
+        })
+        .unique_by(|r_oid| r_oid.as_ref().ok().copied())
+        .collect::<Result<Vec<_>>>()
     }
 
     pub fn thread_local(&self) -> gix::Repository {
@@ -125,14 +121,13 @@ fn collect_refs(
     iter: gix::reference::iter::Iter<'_, '_>,
     prefix: &[u8],
 ) -> Result<Vec<(String, ObjectId)>> {
-    let mut refs = Vec::new();
-    for reference in iter {
+    iter.map(|reference| {
         let mut reference = reference.map_err(|err| anyhow!(err))?;
         let id = reference.peel_to_id()?.detach();
         let name_bytes = reference.name().as_bstr().as_bytes();
         let short_bytes = name_bytes.strip_prefix(prefix).unwrap_or(name_bytes);
         let short = String::from_utf8_lossy(short_bytes).into_owned();
-        refs.push((short, id));
-    }
-    Ok(refs)
+        Ok((short, id))
+    })
+    .collect()
 }
